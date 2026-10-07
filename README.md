@@ -46,6 +46,25 @@ Si se agota la cuota, se guarda el próximo intento según las ventanas agotadas
 
 **Reintentar** repite únicamente la etapa fallida. **Generar de nuevo** solo aparece cuando NotebookLM informó explícitamente que ese audio falló. **Revisión necesaria** significa que el resultado remoto no pudo identificarse sin riesgo de duplicarlo: abre el cuaderno y usa **Comprobar de nuevo** después de que aparezca. Si sigue ambiguo, la aplicación conserva los datos y no envía otra solicitud. Una lista vacía de procedencia del proveedor no se interpreta como prueba de aislamiento al recuperar una solicitud incierta.
 
+## Cuentas y rotación de cuota
+
+La aplicación admite múltiples perfiles de `notebooklm-mcp-cli` (`default`, `cuenta2`, etc.), compatibles con NotebooklmPRO:
+
+1. **Gestión de perfiles**: En el panel lateral «Cuentas y cuota» puedes añadir perfiles, comprobar su estado de sesión/cuota, iniciar sesión con `nlm login` y habilitar/deshabilitar cuentas para la cola.
+2. **Cuenta propietaria y respaldos**: Cada libro se crea con la cuenta activa en ese momento. En la sección «Cuentas de respaldo para este libro» puedes vincular otras cuentas habilitadas. Para utilizarlas, comparte el cuaderno desde NotebookLM con dichas cuentas otorgándoles permiso de **Editor**.
+3. **Rotación automática**: Si la cuenta propietaria agota su cuota disponible (detectada en la consulta o por rechazo remoto `QUOTA`), la cola rota automáticamente a la siguiente cuenta de respaldo configurada sin duplicar el libro ni las fuentes.
+4. **Descargas consistentes**: Cada audio se descarga y convierte utilizando exactamente la cuenta que lo generó (guardada en el registro del bloque).
+
+## Explorador remoto y descarga en lote
+
+Puedes revisar los cuadernos existentes en tus cuentas de NotebookLM y descargar todos sus audios de una sola vez:
+
+1. Pulsa **☁ Explorar cuadernos de mi cuenta** en el panel lateral.
+2. Selecciona el perfil y el cuaderno que deseas inspeccionar.
+3. Se mostrarán todos los podcasts y audios generados en ese cuaderno remoto con sus fuentes vinculadas y estados.
+4. Marca **Seleccionar todos** (o selecciona los audios deseados) y pulsa **Descargar audios seleccionados**.
+5. La cola local los importa como bloques y procesa automáticamente la descarga y conversión a MP3 **uno a uno**, guardándolos ordenadamente en `exports/<nombre-libro>/...`.
+
 ## Entrada desde Node.js
 
 Con la aplicación ejecutándose:
@@ -62,11 +81,22 @@ La API devuelve JSON. Primero consulta `GET /api/health` y utiliza su `token` co
 |---|---|---|
 | GET | `/api/health` | Conexión, perfil, cuota, token local y actividad del worker |
 | POST | `/api/health/check` | Comprobar herramientas/sesión y desbloquear tareas de autenticación |
-| GET | `/api/books` | Libros del perfil activo con bloques y estados |
+| GET | `/api/accounts` | Lista de cuentas configuradas, cuenta activa y estado de salud/cuota |
+| POST | `/api/accounts` | JSON `{ "profile": "cuenta3" }`; registra el perfil en la base local |
+| POST | `/api/accounts/:id/check` | Comprobar conexión y cuota de un perfil específico |
+| POST | `/api/accounts/:id/select` | Seleccionar perfil activo predeterminado para nuevos libros |
+| POST | `/api/accounts/:id/enabled` | JSON `{ "enabled": true }`; habilitar/deshabilitar perfil para la cola |
+| POST | `/api/accounts/:id/login` | Iniciar proceso de autenticación interactivo en Chrome |
+| GET | `/api/remote/notebooks` | Listado de cuadernos remotos en NotebookLM (`?profile=default`) |
+| GET | `/api/remote/notebooks/:id` | Audios, fuentes y estados locales de un cuaderno remoto |
+| POST | `/api/remote/notebooks/:id/import` | JSON `{ "title": "Libro", "profile": "default", "artifactIds": ["art-1", "art-2"] }`; descarga en lote |
+| GET | `/api/books` | Libros con bloques, respaldos y estados |
 | POST | `/api/books` | JSON `{ "title": "Libro", "requestId": "clave-unica" }`; devuelve `{ "id": "..." }` con HTTP 202 |
 | GET | `/api/books/:id` | Estado completo del libro |
+| PUT | `/api/books/:id/accounts` | JSON `{ "profiles": ["cuenta2", "cuenta3"] }`; verifica permisos y asigna respaldos |
 | PUT | `/api/books/:id/files?filename=parte.md&requestId=clave-unica` | Cuerpo binario del archivo; devuelve ID del bloque. HTTP 201 |
 | PATCH | `/api/books/:id/order` | JSON `{ "ids": ["id-bloque-1", "id-bloque-2"] }`, todos los bloques una vez |
+| PATCH | `/api/books/:id/numbering` | JSON `{ "numbering": true }` (o `false`); renombra archivos en disco y actualiza rutas |
 | PATCH | `/api/blocks/:id` | JSON `{ "title": "Nuevo título" }`, antes de solicitar audio |
 | POST | `/api/books/:id/queue` | JSON `{ "action": "start" }`; también `pause` y `resume` |
 | POST | `/api/books/:id/retry` | Reintentar creación o reconciliar cuaderno incierto |

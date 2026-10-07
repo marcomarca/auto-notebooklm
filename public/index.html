@@ -8,17 +8,93 @@
   <aside class="sidebar">
     <div class="brand"><span class="brand-icon" aria-hidden="true">▥</span><div>Audios por bloques<small>Tu libro, capítulo a capítulo</small></div></div>
     <form id="create-form"><label for="book-title">Nuevo libro</label><input id="book-title" name="title" maxlength="180" placeholder="Nombre del libro" required><button id="create-button" type="submit">Crear libro</button></form>
+    <button id="open-explorer" class="quiet explore-button" type="button"><span aria-hidden="true">☁</span> Explorar cuadernos de mi cuenta</button>
     <nav id="library" aria-label="Libros"></nav>
+    <details id="account-panel"><summary>Cuentas y cuota</summary><div id="accounts"></div><form id="account-form"><label for="new-profile">Añadir cuenta</label><input id="new-profile" pattern="[A-Za-z0-9_-]{1,80}" maxlength="80" placeholder="Ej.: cuenta3" required><button id="add-account">Añadir e iniciar sesión</button></form><p class="muted">Los perfiles se comparten con NotebooklmPRO. Habilitar una cuenta permite usarla en la cola.</p></details>
     <div class="connection"><span id="health-label">Comprobando conexión…</span><small id="profile-label"></small><button id="check-connection" class="quiet">Comprobar conexión</button><code id="login-hint" hidden></code></div>
   </aside>
   <main>
+    <div id="permanent-feedback" class="permanent-feedback" hidden>
+      <div class="feedback-main">
+        <span id="feedback-dot" class="feedback-dot"></span>
+        <span id="feedback-text" class="feedback-text"></span>
+        <span id="feedback-percent" class="percent-badge"></span>
+      </div>
+      <div class="feedback-track"><div id="feedback-fill" class="feedback-fill" style="width: 0%"></div></div>
+    </div>
     <header class="page-header"><div><h1 id="current-title">Del libro al podcast</h1><p id="subtitle">Una fuente. Un audio. Cada bloque conserva su lugar.</p></div><a id="remote-link" class="quiet link-button" target="_blank" rel="noopener noreferrer" hidden>Abrir en NotebookLM</a></header>
     <div id="notice" role="status" aria-live="polite" hidden></div>
     <section id="welcome"><div class="book-shape" aria-hidden="true"><span>01</span><span>02</span><span>03</span></div><h2>Empieza con un libro</h2><p>Escribe su nombre a la izquierda. Después añade los capítulos como archivos Markdown o PDF.</p><p class="muted">Cada podcast se genera en español latinoamericano, con duración estándar, y se guarda automáticamente como MP3.</p></section>
+    <section id="explorer" hidden>
+      <div class="explorer-header">
+        <div>
+          <h2>Cuadernos en tu cuenta de NotebookLM</h2>
+          <p class="muted">Selecciona un cuaderno para ver todos sus audios generados y descargarlos en lote uno a uno.</p>
+        </div>
+        <div class="explorer-controls">
+          <label for="explorer-profile">Cuenta:</label>
+          <select id="explorer-profile"></select>
+          <button id="explorer-reload" class="quiet" type="button">Actualizar</button>
+          <button id="close-explorer" class="quiet" type="button">Cerrar explorador</button>
+        </div>
+      </div>
+      <div class="explorer-layout">
+        <div class="explorer-pane">
+          <h3>Cuadernos remotos</h3>
+          <div id="remote-books" class="remote-list"></div>
+        </div>
+        <div class="explorer-main">
+          <div id="remote-detail-empty" class="remote-empty-state">Selecciona un cuaderno de la izquierda para ver su material.</div>
+          <div id="remote-detail" hidden>
+            <div class="remote-detail-header">
+              <div>
+                <h3 id="remote-book-title"></h3>
+                <a id="remote-book-link" class="quiet link-button" target="_blank" rel="noopener noreferrer">Abrir en NotebookLM</a>
+              </div>
+              <div class="remote-bulk-bar">
+                <label class="account-option"><input type="checkbox" id="remote-select-all"> <strong>Seleccionar todos</strong></label>
+                <button id="remote-download-btn" type="button">Descargar audios seleccionados</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width: 44px;"></th>
+                    <th>Audio / Podcast</th>
+                    <th>Fuente vinculada</th>
+                    <th>Estado en Google</th>
+                    <th>Estado local</th>
+                  </tr>
+                </thead>
+                <tbody id="remote-artifacts"></tbody>
+              </table>
+              <div id="remote-artifacts-empty" class="remote-empty-state" hidden>No se encontraron audios en este cuaderno.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
     <section id="workspace" hidden>
       <div id="book-status" role="status"></div>
+      <details id="backup-panel"><summary>Cuentas de respaldo para este libro</summary><p id="book-owner"></p><p>Comparte este cuaderno desde NotebookLM con tus cuentas de respaldo como editoras. Después selecciona las cuentas y pulsa verificar. Todos los audios permanecen en este mismo cuaderno.</p><div id="backups"></div><button id="save-backups" class="quiet">Verificar y guardar respaldos</button><p id="backup-status" role="status"></p></details>
       <label id="drop-zone" tabindex="0" for="files"><span class="drop-symbol" aria-hidden="true">＋</span><strong>Arrastra aquí tus bloques</strong><span>Markdown o PDF · Puedes seleccionar varios archivos</span><input type="file" id="files" accept=".md,.pdf" multiple><span class="select-files">Seleccionar archivos</span></label>
-      <div class="toolbar"><div><strong id="progress-label">0 bloques</strong><small>Español latinoamericano · Podcast · Duración estándar</small></div><div class="actions"><button id="pause" class="quiet">Pausar</button><button id="generate">Generar audios pendientes</button></div></div>
+      <div class="toolbar">
+        <div class="progress-box">
+          <div class="progress-status">
+            <span id="pulse-indicator" class="pulse-dot"></span>
+            <strong id="progress-label">0 de 0 audios listos</strong>
+            <span id="progress-percent" class="percent-badge">0%</span>
+          </div>
+          <div class="progress-track" aria-hidden="true"><div id="progress-bar-fill" class="progress-fill" style="width: 0%"></div></div>
+          <small id="progress-detail">Español latinoamericano · Podcast · Duración estándar</small>
+        </div>
+        <div class="actions">
+          <label class="numbering-toggle" title="Incluir prefijo de número en los nombres de archivo MP3 (ej.: 001 - Título.mp3)"><input type="checkbox" id="book-numbering" checked><span>Numerar archivos</span></label>
+          <button id="pause" class="quiet">Pausar</button>
+          <button id="generate">Generar audios pendientes</button>
+        </div>
+      </div>
       <div id="quota" role="status" hidden></div>
       <div class="table-wrap"><table><thead><tr><th>Bloque</th><th>Fuente y título</th><th>Estado</th><th>Audio</th></tr></thead><tbody id="blocks"></tbody></table><div id="empty-blocks">Añade los archivos para preparar tus primeros bloques.</div></div>
       <footer>Los archivos se guardan en la carpeta <strong>exports</strong> del proyecto. Puedes cerrar esta pestaña; mantén la aplicación ejecutándose para continuar.</footer>

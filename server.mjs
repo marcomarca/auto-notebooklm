@@ -6,9 +6,10 @@ import { Transform } from 'node:stream';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { join, dirname, extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Store, title } from './store.mjs';
+import { Store, title, safeName, exportDirName } from './store.mjs';
 import { Provider, redact } from './provider.mjs';
 import { Queue } from './queue.mjs';
+import { Accounts, profileId } from './accounts.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(root, 'public');
@@ -58,15 +59,31 @@ function requestId(value) {
   return value;
 }
 
-export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(root, 'exports'), provider = new Provider({ profile: process.env.NLM_PROFILE || 'default' }), port = Number(process.env.PORT || 4318), worker = true, check = true } = {}) {
+export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(root, 'exports'), provider = new Provider({ profile: process.env.NLM_PROFILE || 'default' }), accountFactory, port = Number(process.env.PORT || 4318), worker = true, check = true } = {}) {
   await mkdir(dataDir, { recursive: true });
   const releaseLock = await acquireLock(dataDir);
   let store;
   try { store = new Store(join(dataDir, 'queue.sqlite')); } catch (e) { await releaseLock(); throw e; }
-  const queue = new Queue(store, provider, { dataDir, exportsDir });
+  const accounts = new Accounts(store, provider, { factory: accountFactory });
+  const queue = new Queue(store, provider, { dataDir, exportsDir, accounts });
   const token = randomBytes(32).toString('hex');
-  let origin, closed = false, checking, shutdown;
-  const healthCheck = () => checking ||= provider.check().finally(() => { checking = null; });
+  let origin, closed = false, shutdown, initialization;
+  const resumeAuth = id => {
+    for (const b of store.books()) {
+      if (b.profile === id && b.state === 'auth') queue.retryBook(b.id);
+      for (const block of store.blocks(b.id).filter(x => x.state === 'auth' && (x.generation_profile || b.profile) === id)) queue.retryBlock(block.id);
+      const participates = b.profile === id || store.get('SELECT profile FROM book_accounts WHERE book_id=? AND profile=?', b.id, id);
+      if (participates && b.quota_at && accounts.ensure(id).retry_at === 0) {
+        store.update('books', b.id, { quota_at: 0, quota_error: null });
+        for (const block of store.blocks(b.id).filter(x => x.state === 'quota')) queue.retryBlock(block.id);
+      }
+    }
+  };
+  accounts.onReady = resumeAuth;
+  const healthCheck = async (id = accounts.current) => {
+    await accounts.discover(); const h = await accounts.check(id);
+    return h;
+  };
 
   async function upload(req, book, url) {
     const name = filename(url.searchParams.get('filename'));
@@ -130,31 +147,163 @@ export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(
       const url = new URL(req.url, origin);
       const parts = url.pathname.split('/').filter(Boolean);
       if (req.method === 'POST' && url.pathname === '/api/shutdown') {
-        send(res, 200, { ok: true }); setImmediate(() => shutdown().catch(() => {})); return;
+        send(res, 200, { ok: true });
+        setImmediate(async () => {
+          try { await shutdown(); }
+          finally { if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.exit(0); }
+        });
+        return;
       }
-      if (req.method === 'GET' && url.pathname === '/api/health') return send(res, 200, { ...provider.health, token, busy: queue.busy });
+      if (req.method === 'GET' && url.pathname === '/api/health') return send(res, 200, { ...accounts.get(accounts.current).health, token, busy: queue.busy });
       if (req.method === 'POST' && url.pathname === '/api/health/check') {
         const h = await healthCheck();
-        if (h.ready) {
-          for (const b of store.books().filter(b => b.profile === provider.profile)) {
-            if (b.state === 'auth') queue.retryBook(b.id);
-            for (const block of store.blocks(b.id).filter(b => b.state === 'auth')) queue.retryBlock(block.id);
-          }
-        }
         return send(res, 200, h);
       }
-      if (req.method === 'GET' && url.pathname === '/api/books') return send(res, 200, store.snapshot().filter(b => store.book(b.id).profile === provider.profile));
+      if (req.method === 'GET' && url.pathname === '/api/accounts') return send(res, 200, accounts.snapshot());
+      if (req.method === 'POST' && url.pathname === '/api/accounts') {
+        const { profile } = await body(req); accounts.ensure(profileId(profile)); return send(res, 201, accounts.snapshot());
+      }
+      if (parts[0] === 'api' && parts[1] === 'accounts' && parts[2] && req.method === 'POST') {
+        const id = profileId(parts[2]);
+        if (parts[3] === 'check') return send(res, 200, await healthCheck(id));
+        if (parts[3] === 'select') { accounts.select(id); accounts.enable(id, true); return send(res, 200, accounts.snapshot()); }
+        if (parts[3] === 'enabled') {
+          accounts.enable(id, (await body(req)).enabled);
+          for (const b of store.books()) {
+            store.update('books', b.id, { quota_at: 0, quota_error: null });
+            for (const block of store.blocks(b.id).filter(x => x.state === 'quota')) queue.retryBlock(block.id);
+          }
+          return send(res, 200, accounts.snapshot());
+        }
+        if (parts[3] === 'login') {
+          if (queue.busy) throw new Error('Espera a que termine la operación actual antes de iniciar sesión.');
+          accounts.login(id); return send(res, 202, accounts.snapshot());
+        }
+      }
+      if (parts[0] === 'api' && parts[1] === 'remote') {
+        const profile = profileId(url.searchParams.get('profile') || accounts.current);
+        const p = accounts.get(profile);
+        if (parts[2] === 'notebooks' && parts.length === 3 && req.method === 'GET') {
+          const list = await p.listBooks();
+          const items = list.map(b => ({
+            id: b.id || b.notebook_id,
+            title: b.title || 'Sin título',
+            createdAt: b.created_time || b.created_at || null,
+            modifiedAt: b.modified_time || b.modified_at || null
+          })).filter(b => b.id);
+          return send(res, 200, items);
+        }
+        if (parts[2] === 'notebooks' && parts[3]) {
+          const remoteId = parts[3];
+          if (parts.length === 4 && req.method === 'GET') {
+            const [artifacts, sources] = await Promise.all([
+              p.artifacts(remoteId).catch(() => []),
+              p.sources(remoteId).catch(() => [])
+            ]);
+            const sourceMap = new Map(sources.map(s => [s.id || s.source_id, s.title]));
+            const localBook = store.get('SELECT * FROM books WHERE remote_id=?', remoteId);
+            const localBlocks = localBook ? store.blocks(localBook.id) : [];
+            const blockMap = new Map(localBlocks.map(b => [b.artifact_id, b]));
+
+            const audios = artifacts.filter(a => a.type === 'audio' || !a.type).map(a => {
+              const artId = a.artifact_id || a.id;
+              const local = blockMap.get(artId);
+              const sIds = a.source_ids || [];
+              const sourceTitle = sIds.map(id => sourceMap.get(id)).filter(Boolean).join(', ');
+              return {
+                id: artId,
+                title: a.title || sourceTitle || 'Audio',
+                status: a.status || 'completed',
+                sourceIds: sIds,
+                sourceTitle: sourceTitle || null,
+                createdAt: a.created_at || a.created_time || null,
+                errorReason: a.error_reason || null,
+                localState: local?.state || null,
+                localBlockId: local?.id || null,
+                isDone: local?.state === 'done'
+              };
+            });
+            return send(res, 200, {
+              id: remoteId,
+              title: localBook?.title || null,
+              profile,
+              localBookId: localBook?.id || null,
+              artifacts: audios,
+              sources: sources.map(s => ({ id: s.id || s.source_id, title: s.title }))
+            });
+          }
+          if (parts[4] === 'import' && req.method === 'POST') {
+            const payload = await body(req);
+            const reqProfile = profileId(payload.profile || profile);
+            const reqProvider = accounts.get(reqProfile);
+            const bookTitle = title(payload.title || 'Cuaderno remoto');
+            const artifactIds = Array.isArray(payload.artifactIds) ? payload.artifactIds : [];
+            if (!artifactIds.length) throw new Error('Selecciona al menos un audio para descargar.');
+
+            const book = store.importRemoteBook({ remoteId, title: bookTitle, profile: reqProfile });
+            const [artifacts, sources] = await Promise.all([
+              reqProvider.artifacts(remoteId).catch(() => []),
+              reqProvider.sources(remoteId).catch(() => [])
+            ]);
+            const sourceMap = new Map(sources.map(s => [s.id || s.source_id, s.title]));
+            const artMap = new Map(artifacts.map(a => [a.artifact_id || a.id, a]));
+
+            const dir = join(exportsDir, exportDirName(book));
+            await mkdir(dir, { recursive: true });
+            await mkdir(join(dataDir, 'audio'), { recursive: true });
+
+            let importedCount = 0;
+            for (const artId of artifactIds) {
+              const art = artMap.get(artId);
+              const sourceTitle = (art?.source_ids || []).map(id => sourceMap.get(id)).filter(Boolean).join(', ');
+              const artTitle = art?.title || sourceTitle || 'Audio';
+              const sId = art?.source_ids?.[0] || null;
+              const status = art?.status || 'completed';
+
+              const block = store.importRemoteBlock(book.id, {
+                title: artTitle,
+                artifactId: artId,
+                sourceId: sId,
+                profile: reqProfile,
+                status,
+                originalPath: join(dataDir, 'audio', `pending.m4a`),
+                outputPath: null
+              });
+              if (!block.existing) {
+                store.update('blocks', block.id, {
+                  original_path: join(dataDir, 'audio', `${block.id}.m4a`)
+                });
+                importedCount++;
+              }
+            }
+            store.updateBlockOutputPaths(book.id, exportsDir, { renameFiles: false });
+            store.update('books', book.id, { running: 1 });
+            return send(res, 200, { ok: true, bookId: book.id, imported: importedCount });
+          }
+        }
+      }
+      if (req.method === 'GET' && url.pathname === '/api/books') return send(res, 200, store.snapshot());
       if (req.method === 'POST' && url.pathname === '/api/books') {
-        const book = store.createBook(await body(req), provider.profile);
+        const book = store.createBook(await body(req), accounts.current);
         return send(res, 202, { id: book.id });
       }
       if (parts[0] === 'api' && parts[1] === 'books' && parts[2]) {
         const book = store.book(parts[2]);
-        if (!book || book.profile !== provider.profile) return send(res, 404, { error: 'Libro inexistente.' });
+        if (!book) return send(res, 404, { error: 'Libro inexistente.' });
+        if (parts[3] === 'accounts' && req.method === 'PUT') {
+          await accounts.configure(book, (await body(req)).profiles); return send(res, 200, { ok: true });
+        }
         if (parts.length === 3 && req.method === 'GET') return send(res, 200, store.snapshot().find(b => b.id === book.id));
         if (parts[3] === 'files' && req.method === 'PUT') return send(res, 201, await upload(req, book, url));
         if (parts[3] === 'order' && req.method === 'PATCH') {
-          store.reorder(book.id, (await body(req)).ids); return send(res, 200, { ok: true });
+          store.reorder(book.id, (await body(req)).ids);
+          store.updateBlockOutputPaths(book.id, exportsDir, { renameFiles: true });
+          return send(res, 200, { ok: true });
+        }
+        if (parts[3] === 'numbering' && req.method === 'PATCH') {
+          const { numbering } = await body(req);
+          store.setBookNumbering(book.id, numbering !== false, exportsDir);
+          return send(res, 200, { ok: true, numbering: numbering !== false, book: store.snapshot().find(b => b.id === book.id) });
         }
         if (parts[3] === 'queue' && req.method === 'POST') {
           const { action } = await body(req);
@@ -166,11 +315,13 @@ export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(
       }
       if (parts[0] === 'api' && parts[1] === 'blocks' && parts[2]) {
         const block = store.block(parts[2]);
-        if (!block || store.book(block.book_id).profile !== provider.profile) return send(res, 404, { error: 'Bloque inexistente.' });
+        if (!block) return send(res, 404, { error: 'Bloque inexistente.' });
         if (parts.length === 3 && req.method === 'PATCH') {
           const name = title((await body(req)).title);
           if (block.locked) throw new Error('El título ya está fijado para este audio.');
-          store.update('blocks', block.id, { title: name }); return send(res, 200, { ok: true });
+          store.update('blocks', block.id, { title: name });
+          store.updateBlockOutputPaths(block.book_id, exportsDir, { renameFiles: true });
+          return send(res, 200, { ok: true });
         }
         if (parts[3] === 'retry' && req.method === 'POST') { queue.retryBlock(block.id); return send(res, 200, { ok: true }); }
         if (parts[3] === 'audio' && ['GET', 'HEAD'].includes(req.method) && block.state === 'done') {
@@ -212,15 +363,15 @@ export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
   } catch (e) { store.close(); await provider.close(); await releaseLock(); throw e; }
   origin = `http://127.0.0.1:${server.address().port}`;
-  if (check) healthCheck().catch(() => {});
+  if (check) initialization = healthCheck().catch(e => { provider.health.error = redact(e.message); });
   if (worker) queue.start();
   shutdown = async () => {
       if (closed) return; closed = true;
       const closing = new Promise(resolve => server.close(resolve));
-      server.closeAllConnections(); await queue.stop(); await closing; store.close();
+      server.closeAllConnections(); await queue.stop(); await initialization; await closing; store.close();
       await releaseLock();
   };
-  return { server, store, queue, provider, origin, token, close: shutdown };
+  return { server, store, queue, provider, accounts, origin, token, close: shutdown };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

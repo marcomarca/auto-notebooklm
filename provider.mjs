@@ -11,6 +11,7 @@ export function redact(value) {
 }
 export function classify(message) {
   const text = String(message);
+  if (/network_error|ConnectTimeout|ECONN|socket|502|503|504/i.test(text)) return 'TEMPORARY';
   if (/auth|cookies? expired|log.?in|session expired|unauthenticated|401/i.test(text)) return 'AUTH_REQUIRED';
   if (/resource.exhausted|quota|rate.?limit|429|allowance|usage limit/i.test(text)) return 'QUOTA';
   if (/timeout|timed out|ECONN|network|connection|socket|502|503|504|temporarily|not ready|propagat/i.test(text)) return 'TEMPORARY';
@@ -115,6 +116,25 @@ export class Provider {
     return value;
   }
   async listBooks() { return array(await this.cli(['notebook', 'list', '--json', '-p', this.profile]), 'notebooks'); }
+  async profiles() {
+    // Reuse nlm's profile store, as NotebooklmPRO does. Never read cookie files.
+    const output = await this.cli(['login', 'profile', 'list'], { parse: false, timeout: 15000 });
+    return [...output.matchAll(/^\s+([\w-]{1,80}):\s*(.*?)\s*$/gm)].map(m => ({
+      id: m[1], email: /^[^\s@]+@[^\s@]+$/.test(m[2]) ? m[2] : null
+    }));
+  }
+  async access(bookId, email) {
+    if (!email) throw new ProviderError('ACCESS', 'Comprueba primero la identidad guardada de esta cuenta.');
+    const value = await this.cli(['share', 'status', remoteId(bookId), '--json', '-p', this.profile]);
+    const me = value.collaborators?.find(c => c.email?.toLowerCase() === email.toLowerCase());
+    if (!me || !['owner', 'editor'].includes(me.role) || me.is_pending)
+      throw new ProviderError('ACCESS', 'Esta cuenta necesita acceso de edición activo al mismo cuaderno. Compártelo desde NotebookLM y vuelve a verificar.');
+    await this.sources(bookId);
+    return true;
+  }
+  async login() {
+    return this.cli(['login', '-p', this.profile], { parse: false, timeout: 360000 });
+  }
   async createBook(name) {
     const r = await this.cli(['notebook', 'create', name, '--json', '-p', this.profile]);
     return remoteId(r.notebook_id);
@@ -128,9 +148,33 @@ export class Provider {
     return remoteId(r.source_id);
   }
   async artifacts(bookId, artifactId) {
-    const args = ['studio', 'status', remoteId(bookId), '--full', '--json', '--mcp-compatible', '-p', this.profile];
-    if (artifactId) args.push('--artifact-id', remoteId(artifactId));
-    return array(await this.cli(args), 'artifacts');
+    if (artifactId) {
+      const args = ['studio', 'status', remoteId(bookId), '--full', '--json', '--mcp-compatible', '--artifact-id', remoteId(artifactId), '-p', this.profile];
+      return array(await this.cli(args), 'artifacts');
+    }
+    const all = [];
+    const seen = new Set();
+    let offset = 0;
+    const limit = 100;
+    while (true) {
+      const args = ['studio', 'status', remoteId(bookId), '--full', '--json', '--mcp-compatible', '--limit', String(limit), '--offset', String(offset), '-p', this.profile];
+      const page = array(await this.cli(args), 'artifacts');
+      let newCount = 0;
+      for (const item of page) {
+        const id = item.artifact_id || item.id;
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          all.push(item);
+          newCount++;
+        } else if (!id) {
+          all.push(item);
+          newCount++;
+        }
+      }
+      if (page.length < limit || newCount === 0 || all.length >= 2000) break;
+      offset += limit;
+    }
+    return all;
   }
   async generate(bookId, sourceId) {
     // Never let the CLI's omitted-source default broaden this to the whole notebook.
