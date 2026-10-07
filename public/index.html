@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Audios por bloques</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">▥</span><div>Audios por bloques<small>Tu libro, capítulo a capítulo</small></div></div>
+    <form id="create-form"><label for="book-title">Nuevo libro</label><input id="book-title" name="title" maxlength="180" placeholder="Nombre del libro" required><button id="create-button" type="submit">Crear libro</button></form>
+    <nav id="library" aria-label="Libros"></nav>
+    <div class="connection"><span id="health-label">Comprobando conexión…</span><small id="profile-label"></small><button id="check-connection" class="quiet">Comprobar conexión</button><code id="login-hint" hidden></code></div>
+  </aside>
+  <main>
+    <header class="page-header"><div><h1 id="current-title">Del libro al podcast</h1><p id="subtitle">Una fuente. Un audio. Cada bloque conserva su lugar.</p></div><a id="remote-link" class="quiet link-button" target="_blank" rel="noopener noreferrer" hidden>Abrir en NotebookLM</a></header>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+    <section id="welcome"><div class="book-shape" aria-hidden="true"><span>01</span><span>02</span><span>03</span></div><h2>Empieza con un libro</h2><p>Escribe su nombre a la izquierda. Después añade los capítulos como archivos Markdown o PDF.</p><p class="muted">Cada podcast se genera en español latinoamericano, con duración estándar, y se guarda automáticamente como MP3.</p></section>
+    <section id="workspace" hidden>
+      <div id="book-status" role="status"></div>
+      <label id="drop-zone" tabindex="0" for="files"><span class="drop-symbol" aria-hidden="true">＋</span><strong>Arrastra aquí tus bloques</strong><span>Markdown o PDF · Puedes seleccionar varios archivos</span><input type="file" id="files" accept=".md,.pdf" multiple><span class="select-files">Seleccionar archivos</span></label>
+      <div class="toolbar"><div><strong id="progress-label">0 bloques</strong><small>Español latinoamericano · Podcast · Duración estándar</small></div><div class="actions"><button id="pause" class="quiet">Pausar</button><button id="generate">Generar audios pendientes</button></div></div>
+      <div id="quota" role="status" hidden></div>
+      <div class="table-wrap"><table><thead><tr><th>Bloque</th><th>Fuente y título</th><th>Estado</th><th>Audio</th></tr></thead><tbody id="blocks"></tbody></table><div id="empty-blocks">Añade los archivos para preparar tus primeros bloques.</div></div>
+      <footer>Los archivos se guardan en la carpeta <strong>exports</strong> del proyecto. Puedes cerrar esta pestaña; mantén la aplicación ejecutándose para continuar.</footer>
+    </section>
+  </main>
+</body>
+</html>
