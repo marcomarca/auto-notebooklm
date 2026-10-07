@@ -43,10 +43,16 @@ export class Queue {
     // Track an already submitted audio even if the book was paused or quota ran out.
     const all = books.flatMap(book => this.store.blocks(book.id).map(block => ({ book, block })));
     const runnable = b => !['done', 'review', 'auth'].includes(b.state) && b.next_at <= now && !(b.state === 'error' && b.attempts > 3);
-    const active = all.find(({ block }) => ['poll', 'download', 'convert'].includes(block.stage) && runnable(block));
-    if (active) return this.runBlock(active.book, active.block);
 
-    // Submitted jobs always keep their original profile. New uploads use the owner.
+    // 1. Fast local download & convert jobs
+    const local = all.find(({ block }) => ['download', 'convert'].includes(block.stage) && runnable(block));
+    if (local) return this.runBlock(local.book, local.block);
+
+    // 2. Poll audios in Google's cloud generation whose timer has elapsed
+    const polling = all.find(({ block }) => block.stage === 'poll' && runnable(block));
+    if (polling) return this.runBlock(polling.book, polling.block);
+
+    // 3. Submitted jobs always keep their original profile. New uploads use the owner.
     const healthy = [];
     for (const id of new Set(books.map(b => b.profile))) {
       const p = this.providerFor({ profile: id });
@@ -57,20 +63,22 @@ export class Queue {
     }
     if (!this.accounts && !this.provider.health.ready) return;
 
+    // 4. Create book in NotebookLM if needed
     const book = books.find(b => healthy.includes(b.profile) && !b.remote_id && !['review', 'auth'].includes(b.state) && b.next_at <= now && !(b.state === 'error' && b.attempts > 3));
     if (book) return this.runBook(book);
 
+    // 5. Upload source files
     const upload = all.find(({ book, block }) => healthy.includes(book.profile) && book.remote_id && ['upload', 'source'].includes(block.stage) && runnable(block));
     if (upload) return this.runBlock(upload.book, upload.block);
 
-    // ponytail: one global worker preserves ordering; parallel workers only if throughput is needed.
-    const outstanding = all.some(({ block }) => block.stage === 'poll' || (block.stage === 'generate' && block.baseline));
+    // 6. Reconcile any uncertain generation baseline
     const uncertain = all.find(({ book, block }) => book.remote_id && block.stage === 'generate' && block.baseline && runnable(block));
     if (uncertain) return this.runBlock(uncertain.book, uncertain.block);
-    if (!outstanding) {
-      const next = all.find(({ book, block }) => book.remote_id && book.running && book.quota_at <= now && block.stage === 'generate' && runnable(block));
-      if (next) return this.runBlock(next.book, next.block);
-    }
+
+    // 7. Dispatch next audio generation continuously: sends requests to Google one after another
+    const next = all.find(({ book, block }) => book.remote_id && book.running && book.quota_at <= now && block.stage === 'generate' && !block.baseline && runnable(block));
+    if (next) return this.runBlock(next.book, next.block);
+
     for (const b of books.filter(b => b.running)) {
       const blocks = this.store.blocks(b.id);
       if (blocks.length && blocks.every(x => x.state === 'done')) this.store.update('books', b.id, { running: 0 });
@@ -202,7 +210,7 @@ export class Queue {
       this.fail('blocks', current, error, provider);
     }
   }
-  defer(book, block, retryAt, message = 'Cuota agotada. Los pendientes continuarán automáticamente cuando haya disponibilidad.') {
+  defer(book, block, retryAt, message = 'Cuota agotada. Generar más tarde activado: los pendientes continuarán automáticamente cuando se restablezca la cuota.') {
     this.store.update('books', book.id, { quota_at: retryAt, quota_error: message });
     this.store.update('blocks', block.id, { state: 'quota', next_at: retryAt, error: message, error_code: 'QUOTA', baseline: null });
   }

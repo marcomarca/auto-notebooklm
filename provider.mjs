@@ -30,10 +30,10 @@ export class CommandRunner {
     killer.on('error', () => child.kill());
     killer.on('close', code => { if (code !== 0) child.kill(); });
   }
-  run(binary, args, { timeout = 120000, env = {} } = {}) {
+  run(binary, args, { timeout = 120000, env = {}, windowsHide = true } = {}) {
     if (this.closed) return Promise.reject(new ProviderError('UNAVAILABLE', 'La aplicación está cerrando.'));
     return new Promise((resolve, reject) => {
-      const child = spawn(binary, args, { shell: false, windowsHide: true, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn(binary, args, { shell: false, windowsHide, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
       this.children.add(child);
       child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
       let stdout = '', stderr = '', failure;
@@ -50,8 +50,17 @@ export class CommandRunner {
         clearTimeout(timer); this.children.delete(child);
         if (failure) reject(failure);
         else if (code !== 0) {
-          const message = redact(stderr || stdout || 'El proveedor terminó sin respuesta.').slice(0, 1200);
-          reject(new ProviderError(classify(message), message, code === null));
+          const raw = (stderr || stdout || 'El proveedor terminó sin respuesta.').trim();
+          let message = raw;
+          try {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === 'object') {
+              message = parsed.error || parsed.message || parsed.detail || raw;
+              if (typeof message === 'object') message = JSON.stringify(message);
+            }
+          } catch {}
+          message = redact(message).slice(0, 1200);
+          reject(new ProviderError(classify(message || raw), message, code === null));
         } else resolve(stdout);
       });
     });
@@ -83,11 +92,12 @@ export class Provider {
     this.profile = profile; this.runner = runner; this.nlm = nlm; this.ffmpeg = ffmpeg;
     this.health = { ready: false, profile, cli: false, ffmpeg: false, auth: false, error: 'Comprobando conexión…' };
   }
-  async cli(args, { parse = true, timeout = 120000 } = {}) {
-    const stdout = await this.runner.run(this.nlm, args, { timeout, env: { NLM_PROFILE: this.profile, NO_COLOR: '1', TERM: 'dumb', COLUMNS: '240' } });
+  async cli(args, { parse = true, timeout = 120000, windowsHide = true } = {}) {
+    const stdout = await this.runner.run(this.nlm, args, { timeout, windowsHide, env: { NLM_PROFILE: this.profile, NO_COLOR: '1', TERM: 'dumb', COLUMNS: '240' } });
     const result = parse ? json(stdout) : stdout;
     if (parse && result?.error) {
-      const message = redact(typeof result.error === 'string' ? result.error : JSON.stringify(result.error));
+      const raw = result.error;
+      const message = redact(typeof raw === 'object' ? (raw.error || raw.message || JSON.stringify(raw)) : String(raw));
       throw new ProviderError(classify(message), message);
     }
     return result;
@@ -132,8 +142,11 @@ export class Provider {
     await this.sources(bookId);
     return true;
   }
+  async shareInvite(bookId, email, role = 'editor') {
+    return this.cli(['share', 'invite', remoteId(bookId), email, '--role', role, '-p', this.profile]);
+  }
   async login() {
-    return this.cli(['login', '-p', this.profile], { parse: false, timeout: 360000 });
+    return this.cli(['login', '-p', this.profile], { parse: false, timeout: 360000, windowsHide: false });
   }
   async createBook(name) {
     const r = await this.cli(['notebook', 'create', name, '--json', '-p', this.profile]);

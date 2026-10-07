@@ -121,9 +121,27 @@ test('fallo de autenticación después de cargar conserva el diario para evitar 
   f.provider.health.ready=true;f.queue.retryBlock(block.id);await f.tick(3);
   assert.equal(f.provider.calls.filter(c=>c[0]==='upload').length,1);assert.equal(f.store.block(block.id).state,'ready');
 });
-test('un audio en cola de Google se consulta sin solicitar el siguiente',async t=>{
-  const f=await fixture(t);f.add(1);f.add(2);await f.tick(5);f.store.update('books',f.book.id,{running:1});await f.tick();
-  f.provider.remoteArtifacts[0].status='queued';await f.tick(4);
-  assert.equal(f.store.blocks(f.book.id)[0].state,'queued');assert.equal(f.provider.generations,1);
-  f.provider.remoteArtifacts[0].status='completed';await f.tick(12);assert.equal(f.provider.generations,2);
+test('generaciones continuas: envía las solicitudes de audio una tras otra sin esperar a que el audio anterior termine', async t => {
+  const f = await fixture(t);
+  const one = f.add(1), two = f.add(2);
+  f.store.update('books', f.book.id, { remote_id: 'remote-book', state: 'ready', running: 1 });
+  f.store.update('blocks', one.id, { stage: 'generate', state: 'ready', source_id: 'src-1' });
+  f.store.update('blocks', two.id, { stage: 'generate', state: 'ready', source_id: 'src-2' });
+
+  // Tick 1: Dispatches generation for block 1
+  await f.queue.tick();
+  assert.equal(f.provider.generations, 1);
+  assert.equal(f.store.block(one.id).state, 'generating');
+  assert.equal(f.store.block(one.id).stage, 'poll');
+
+  // Tick 2: Dispatches generation for block 2 immediately without waiting for block 1 to complete
+  await f.queue.tick();
+  assert.equal(f.provider.generations, 2);
+  assert.equal(f.store.block(two.id).state, 'generating');
+  assert.equal(f.store.block(two.id).stage, 'poll');
+
+  // Both complete and download
+  await f.tick(15);
+  assert.equal(f.store.block(one.id).state, 'done');
+  assert.equal(f.store.block(two.id).state, 'done');
 });

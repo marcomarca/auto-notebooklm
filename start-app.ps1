@@ -18,7 +18,7 @@ if ($existingHealth) {
 }
 
 try {
-    $appProcess = Start-Process -FilePath (Get-Command node).Source -ArgumentList 'server.mjs' -WorkingDirectory $projectDir -WindowStyle Hidden -PassThru
+    $appProcess = Start-Process -FilePath (Get-Command node).Source -ArgumentList 'server.mjs' -WorkingDirectory $projectDir -PassThru
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         Start-Sleep -Milliseconds 250
         if ($appProcess.HasExited) { throw 'El servidor no pudo iniciarse. Ejecuta npm start para ver el error; comprueba si el puerto está ocupado.' }

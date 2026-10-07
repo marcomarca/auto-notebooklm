@@ -8,6 +8,7 @@
 summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
 .account-card { display: grid; gap: 6px; padding: 12px 0; border-bottom: 1px solid #dce3ed; }
 .account-card small { overflow-wrap: anywhere; }
+.block-hint { font-size: 12px; line-height: 1.5; color: var(--blue); font-weight: 500; }
 .account-option { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; }
 .account-option input { width: auto; margin: 0; }
 .account-actions { display: flex; gap: 5px; flex-wrap: wrap; }

@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const labels = { pending:'Pendiente', creating:'Creando libro', ready:'Fuente lista', upload_pending:'Por cargar', uploading:'Cargando fuente', source_processing:'Procesando fuente', submitting:'Solicitando audio', queued:'En cola de Google', generating:'Generando', download:'Descargando', convert:'Convirtiendo a MP3', done:'MP3 listo', quota:'Esperando cuota', review:'Revisión necesaria', auth:'Iniciar sesión', error:'Error' };
+const labels = { pending:'Pendiente', creating:'Creando libro', ready:'Fuente lista', upload_pending:'Por cargar', uploading:'Cargando fuente', source_processing:'Procesando fuente', submitting:'Solicitando audio', queued:'En cola de Google', generating:'Generando', download:'Descargando', convert:'Convirtiendo a MP3', done:'MP3 listo', quota:'Esperando cuota (Generar más tarde)', review:'Revisión necesaria', auth:'Iniciar sesión', error:'Error' };
 let token, books = [], selected = localStorage.getItem('selected-book'), uploading = false, lastRender = '', refreshing = false;
 let createRequest = crypto.randomUUID();
 let accountData = { accounts: [] }, accountStamp = '', backupStamp = '', savingBackups = false;
@@ -71,18 +71,31 @@ function renderAccounts() {
     const card = el('div', { class: 'account-card' });
     const h = a.health, windows = h.usage?.windows || [];
     const remaining = windows.filter(w => typeof w.percent_remaining === 'number').map(w => w.percent_remaining);
-    const status = h.ready ? 'Sesión comprobada' : h.errorCode === 'AUTH_REQUIRED' ? 'Sesión expirada' : 'Sesión sin confirmar';
+    const isLoggingIn = accountData.loginProfile === a.id;
+    const status = isLoggingIn ? 'Iniciando sesión en el navegador…' : h.ready ? 'Sesión comprobada' : h.errorCode === 'AUTH_REQUIRED' ? 'Sesión expirada' : 'Sesión sin confirmar';
     card.append(el('strong', {}, `${a.id}${a.id === accountData.current ? ' · Para nuevos libros' : ''}`),
-      el('small', {}, a.email || 'Sin cuenta guardada'), el('small', {}, `${status}${remaining.length ? ` · Cuota mínima restante: ${Math.min(...remaining)}%` : ' · Cuota sin confirmar'}`));
-    if (a.error || h.error) card.append(el('small', { class: 'block-error' }, a.error || h.error));
-    if (a.nextAt) card.append(el('small', {}, `Próxima comprobación: ${date(a.nextAt)}`));
+      el('small', {}, a.email || 'Sin cuenta guardada'), el('small', {}, `${status}${remaining.length ? ` · Cuota mínima restante: ${Math.min(...remaining)}%` : isLoggingIn ? '' : ' · Cuota sin confirmar'}`));
+    if (isLoggingIn) {
+      card.append(el('small', { class: 'block-hint' }, 'Completa el inicio de sesión en la ventana de Chrome que se ha abierto.'));
+    } else if (a.error || h.error) {
+      card.append(el('small', { class: 'block-error' }, a.error || h.error));
+    }
+    if (a.nextAt && !isLoggingIn) card.append(el('small', {}, `Próxima comprobación: ${date(a.nextAt)}`));
     const enabled = el('input', { type: 'checkbox', checked: a.enabled });
     enabled.addEventListener('change', () => act(() => api(`/api/accounts/${a.id}/enabled`, { method: 'POST', data: { enabled: enabled.checked } })));
     const label = el('label', { class: 'account-option' }); label.append(enabled, document.createTextNode('Habilitada para la cola')); card.append(label);
     const buttons = el('div', { class: 'account-actions' });
-    for (const [action, text] of [['check', 'Comprobar'], ['login', accountData.loginProfile === a.id ? 'Iniciando sesión…' : 'Iniciar sesión'], ['select', 'Usar para nuevos libros']]) {
-      const button = el('button', { class: 'quiet', disabled: action === 'login' && !!accountData.loginProfile || action === 'select' && a.id === accountData.current,
-        onclick: () => { button.disabled = true; act(async () => { await api(`/api/accounts/${a.id}/${action}`, { method: 'POST' }); if (action === 'select') createRequest = crypto.randomUUID(); if (action === 'login') notice('Completa el inicio de sesión en la ventana de Chrome.'); }).finally(() => { button.disabled = false; accountStamp = ''; }); } }, text);
+    for (const [action, text] of [['check', 'Comprobar'], ['login', isLoggingIn ? 'Iniciando sesión…' : 'Iniciar sesión'], ['select', 'Usar para nuevos libros']]) {
+      const button = el('button', { class: 'quiet', disabled: (action === 'login' && !!accountData.loginProfile) || (action === 'select' && a.id === accountData.current),
+        onclick: () => {
+          button.disabled = true;
+          act(async () => {
+            await api(`/api/accounts/${a.id}/${action}`, { method: 'POST' });
+            if (action === 'select') createRequest = crypto.randomUUID();
+            if (action === 'login') notice('Se ha abierto Chrome para iniciar sesión. Al terminar, la cuenta se validará automáticamente.');
+          }).finally(() => { button.disabled = false; accountStamp = ''; });
+        }
+      }, text);
       buttons.append(button);
     }
     card.append(buttons); return card;
@@ -285,7 +298,7 @@ function getActiveStatus() {
     dotClass += ' active';
     isLive = true;
   } else if (book.quotaError || book.blocks.some(b => b.state === 'quota')) {
-    action = `${book.title} · Esperando cuota (${done} de ${total} listos)`;
+    action = `${book.title} · Esperando cuota (Generar más tarde) (${done} de ${total} listos)`;
     dotClass += ' waiting';
     isLive = true;
   } else if (done === total && total > 0) {
@@ -371,7 +384,7 @@ function render() {
     actionText = `${verb} audio ${activeBlock.number} de ${totalCount}: «${activeBlock.title}»`;
     pulseClass += ' active';
   } else if (book.quotaError || book.blocks.some(b => b.state === 'quota')) {
-    actionText = `Esperando cuota (${doneCount} de ${totalCount} listos)`;
+    actionText = `Esperando cuota (Generar más tarde) (${doneCount} de ${totalCount} listos)`;
     pulseClass += ' waiting';
   } else if (doneCount === totalCount && totalCount > 0) {
     actionText = `Todos los audios completados (${totalCount} MP3 listos)`;
@@ -479,7 +492,14 @@ $('create-form').addEventListener('submit',event=>{
 $('book-title').addEventListener('input',()=>{createRequest=crypto.randomUUID();});
 $('account-form').addEventListener('submit', event => {
   event.preventDefault(); $('add-account').disabled = true;
-  act(async () => { const profile = $('new-profile').value; await api('/api/accounts', { method: 'POST', data: { profile } }); await api(`/api/accounts/${profile}/login`, { method: 'POST' }); $('new-profile').value = ''; notice('Completa el inicio de sesión en Chrome y habilita la cuenta para la cola.'); }).finally(() => { $('add-account').disabled = false; });
+  act(async () => {
+    const profile = $('new-profile').value.trim();
+    if (!profile) return;
+    await api('/api/accounts', { method: 'POST', data: { profile } });
+    await api(`/api/accounts/${profile}/login`, { method: 'POST' });
+    $('new-profile').value = '';
+    notice('Se ha abierto Chrome para iniciar sesión. Al terminar, la cuenta se validará automáticamente.');
+  }).finally(() => { $('add-account').disabled = false; });
 });
 $('save-backups').addEventListener('click', () => {
   const bookId = selected, profiles = [...$('backups').querySelectorAll('input:checked')].map(n => n.value);

@@ -145,3 +145,56 @@ test('API cambia cuenta para nuevos libros, conserva existentes y no configura r
   assert.equal((await call(`/api/books/${first.id}/accounts`,'PUT',{profiles:['cuenta2']})).status,400);
   assert.equal((await call('/api/accounts','POST',{profile:'../../bad'})).status,400);
 });
+test('login abre sesión con windowsHide: false, gestiona estado activo y no es bloqueado por la cola', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'nlm-login-test-'));
+  const store = new Store(join(dir, 'queue.sqlite'));
+  const calls = [];
+  class LoginProvider extends FakeProvider {
+    constructor(profile) {
+      super(); this.profile = profile; this.health = { ready: false, auth: false, profile, error: 'Sesión expirada.' };
+    }
+    async login() {
+      calls.push(['login', this.profile]);
+      this.health = { ready: true, auth: true, profile: this.profile, error: null };
+    }
+    async check() { return this.health; }
+    async profiles() { return [{ id: this.profile, email: `${this.profile}@gmail.com` }]; }
+  }
+  const providers = new Map(['default', 'cuenta2'].map(id => [id, new LoginProvider(id)]));
+  const accounts = new Accounts(store, providers.get('default'), { factory: id => providers.get(id) });
+  t.after(async () => { await accounts.close(); store.close(); await rm(dir, { recursive: true, force: true }); });
+  
+  // Login starts and marks loginProfile
+  accounts.login('cuenta2');
+  assert.equal(accounts.loginProfile, 'cuenta2');
+  // Concurrent check during login returns in-progress message without overwriting
+  const checking = await accounts.check('cuenta2');
+  assert.equal(checking.ready, false);
+  assert.match(checking.error, /Inicio de sesión en curso/);
+
+  // Wait for login task to finish
+  await Promise.all(accounts.tasks);
+  assert.equal(accounts.loginProfile, null);
+  assert.deepEqual(calls, [['login', 'cuenta2']]);
+  assert.equal(accounts.ensure('cuenta2').email, 'cuenta2@gmail.com');
+  assert.equal(providers.get('cuenta2').health.ready, true);
+});
+test('Provider.login ejecuta comando sin ocultar ventana y extrae errores JSON limpiamente', async () => {
+  const calls = [];
+  const runner = {
+    run: async (bin, args, opts) => {
+      calls.push({ bin, args, opts });
+      if (args[0] === 'login') return 'Login success';
+      if (args[0] === 'usage') {
+        const err = new ProviderError('AUTH_REQUIRED', 'Could not read plan usage — Authentication expired.');
+        throw err;
+      }
+      return '{}';
+    },
+    close: async () => {}
+  };
+  const p = new Provider({ profile: 'cuenta2', runner });
+  await p.login();
+  assert.equal(calls[0].opts.windowsHide, false);
+  assert.deepEqual(calls[0].args, ['login', '-p', 'cuenta2']);
+});

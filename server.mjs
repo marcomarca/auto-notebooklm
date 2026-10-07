@@ -176,7 +176,6 @@ export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(
           return send(res, 200, accounts.snapshot());
         }
         if (parts[3] === 'login') {
-          if (queue.busy) throw new Error('Espera a que termine la operación actual antes de iniciar sesión.');
           accounts.login(id); return send(res, 202, accounts.snapshot());
         }
       }

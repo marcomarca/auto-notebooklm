@@ -27,9 +27,15 @@ export class Accounts {
     return this.providers.get(id);
   }
   async discover() {
-    if (this.primary.profiles) {
-      try { for (const p of await this.primary.profiles()) this.ensure(p.id, p.email); }
-      catch {}
+    for (const p of this.providers.values()) {
+      if (p.profiles) {
+        try {
+          const list = await p.profiles();
+          if (Array.isArray(list)) {
+            for (const item of list) this.ensure(item.id, item.email);
+          }
+        } catch {}
+      }
     }
     for (const id of ['default', 'cuenta2', 'cuenta3', 'cuenta4']) this.ensure(id);
     return this.snapshot();
@@ -51,11 +57,18 @@ export class Accounts {
   }
   async check(id) {
     if (this.closed) throw new Error('La aplicación está cerrando.');
+    if (this.loginProfile === id) {
+      return { ready: false, auth: false, profile: id, error: 'Inicio de sesión en curso en el navegador…' };
+    }
     if (this.checks.has(id)) return this.checks.get(id);
     const task = (async () => {
       const p = this.get(id); const h = await p.check();
+      let errorMsg = h.error || null;
+      if (h.errorCode === 'AUTH_REQUIRED') {
+        errorMsg = errorMsg && errorMsg.length < 100 ? errorMsg : 'Sesión expirada. Pulsa «Iniciar sesión» para renovarla.';
+      }
       this.store.update('accounts', id, { retry_at: h.ready ? quotaRetry(h.usage, this.now()) : this.now() + 1800000,
-        error: h.error || null, error_code: h.ready ? null : h.errorCode || 'UNAVAILABLE' });
+        error: errorMsg, error_code: h.ready ? null : h.errorCode || 'UNAVAILABLE' });
       if (h.ready && !this.closed) this.onReady?.(id);
       return h;
     })();
@@ -66,7 +79,16 @@ export class Accounts {
     const h = await this.check(id);
     if (!h.ready) throw new ProviderError(h.errorCode || 'UNAVAILABLE', h.error || 'Cuenta sin conexión.');
     const account = this.ensure(id);
-    if (id !== book.profile) await this.get(id).access(book.remote_id, account.email);
+    if (id !== book.profile) {
+      if (account.email) {
+        const owner = this.get(book.profile);
+        if (owner.shareInvite) {
+          try { await owner.shareInvite(book.remote_id, account.email, 'editor'); }
+          catch {}
+        }
+      }
+      await this.get(id).access(book.remote_id, account.email);
+    }
     return true;
   }
   async configure(book, profiles) {
@@ -126,9 +148,20 @@ export class Accounts {
     if (this.loginProfile) throw new Error('Completa primero el inicio de sesión en curso.');
     this.ensure(id); this.loginProfile = id;
     const task = (async () => {
-      try { await this.get(id).login(); await this.discover(); await this.check(id); }
-      catch (e) { if (!this.closed) this.store.update('accounts', id, { error: redact(e.message), error_code: e.code || 'PROVIDER' }); }
-      finally { this.loginProfile = null; }
+      try {
+        await this.get(id).login();
+        await this.discover();
+        await this.check(id);
+      } catch (e) {
+        if (!this.closed) {
+          const raw = e.message;
+          this.store.update('accounts', id, { error: redact(raw), error_code: e.code || 'PROVIDER' });
+          const p = this.get(id);
+          p.health = { ...p.health, ready: false, auth: false, error: redact(raw), errorCode: e.code || 'PROVIDER' };
+        }
+      } finally {
+        this.loginProfile = null;
+      }
     })();
     this.tasks.add(task); task.finally(() => this.tasks.delete(task));
   }
