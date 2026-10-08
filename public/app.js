@@ -350,6 +350,7 @@ function render() {
     $('current-title').textContent = 'Explorador de cuadernos';
     $('subtitle').textContent = 'Revisa tus libros de NotebookLM y descarga sus audios en lote con un clic.';
     $('remote-link').hidden = true;
+    $('open-folder-btn').hidden = true;
     return;
   }
 
@@ -358,6 +359,7 @@ function render() {
   $('current-title').textContent = book?.title || 'Del libro al podcast';
   $('subtitle').textContent = book ? 'Un podcast independiente por fuente, dentro del mismo libro.' : 'Una fuente. Un audio. Cada bloque conserva su lugar.';
   $('remote-link').hidden = !book?.url; if (book?.url) $('remote-link').href=book.url;
+  $('open-folder-btn').hidden = !book;
   if (!book) return;
   renderBackups(book);
   const status = $('book-status'); status.replaceChildren();
@@ -509,6 +511,19 @@ $('save-backups').addEventListener('click', () => {
 $('check-connection').addEventListener('click',()=>{
   $('check-connection').disabled=true;
   act(async()=>{showHealth(await api('/api/health/check',{method:'POST'}));}).finally(()=>{$('check-connection').disabled=false;});
+});
+$('open-folder-btn')?.addEventListener('click', () => {
+  if (!selected) return;
+  act(async () => {
+    const res = await api(`/api/books/${selected}/open-folder`, { method: 'POST' });
+    notice(`Carpeta abierta en el Explorador de Windows: ${res.path}`);
+  });
+});
+$('open-exports-btn')?.addEventListener('click', () => {
+  act(async () => {
+    const res = await api('/api/exports/open', { method: 'POST' });
+    notice(`Carpeta exports abierta en el Explorador de Windows: ${res.path}`);
+  });
 });
 $('generate').addEventListener('click',()=>act(()=>api(`/api/books/${selected}/queue`,{method:'POST',data:{action:'start'}})));
 $('pause').addEventListener('click',()=>act(()=>api(`/api/books/${selected}/queue`,{method:'POST',data:{action:'pause'}})));

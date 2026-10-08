@@ -62,3 +62,13 @@ test('cargas concurrentes del mismo archivo conservan un único bloque',async t=
   assert.ok(responses.every(r=>r.status===201));
   const values=await Promise.all(responses.map(r=>r.json()));assert.equal(new Set(values.map(v=>v.id)).size,1);assert.equal(app.store.blocks(book.id).length,1);
 });
+test('endpoints de explorador abren la carpeta del libro y la raíz de exports', async t => {
+  const { call, book } = await appFixture(t);
+  const res1 = await call(`/api/books/${book.id}/open-folder`, 'POST').then(r => r.json());
+  assert.equal(res1.ok, true);
+  assert.match(res1.path, /exports/);
+  const res2 = await call('/api/exports/open', 'POST').then(r => r.json());
+  assert.equal(res2.ok, true);
+  assert.match(res2.path, /exports/);
+});
+

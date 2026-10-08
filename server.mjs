@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, readFile, rename, rm, open } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
@@ -10,6 +11,20 @@ import { Store, title, safeName, exportDirName } from './store.mjs';
 import { Provider, redact } from './provider.mjs';
 import { Queue } from './queue.mjs';
 import { Accounts, profileId } from './accounts.mjs';
+
+export function openInExplorer(targetPath) {
+  const dir = resolve(targetPath);
+  try {
+    if (process.platform === 'win32') {
+      spawn('explorer.exe', [dir], { detached: true, stdio: 'ignore' }).unref();
+    } else if (process.platform === 'darwin') {
+      spawn('open', [dir], { detached: true, stdio: 'ignore' }).unref();
+    } else {
+      spawn('xdg-open', [dir], { detached: true, stdio: 'ignore' }).unref();
+    }
+  } catch {}
+  return dir;
+}
 
 const root = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(root, 'public');
@@ -310,7 +325,19 @@ export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(
           store.update('books', book.id, { running: action === 'pause' ? 0 : 1 });
           return send(res, 200, { ok: true });
         }
+        if (parts[3] === 'open-folder' && req.method === 'POST') {
+          const dir = resolve(join(exportsDir, exportDirName(book)));
+          await mkdir(dir, { recursive: true });
+          openInExplorer(dir);
+          return send(res, 200, { ok: true, path: dir });
+        }
         if (parts[3] === 'retry' && req.method === 'POST') { queue.retryBook(book.id); return send(res, 200, { ok: true }); }
+      }
+      if (req.method === 'POST' && url.pathname === '/api/exports/open') {
+        const dir = resolve(exportsDir);
+        await mkdir(dir, { recursive: true });
+        openInExplorer(dir);
+        return send(res, 200, { ok: true, path: dir });
       }
       if (parts[0] === 'api' && parts[1] === 'blocks' && parts[2]) {
         const block = store.block(parts[2]);

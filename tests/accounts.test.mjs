@@ -196,5 +196,5 @@ test('Provider.login ejecuta comando sin ocultar ventana y extrae errores JSON l
   const p = new Provider({ profile: 'cuenta2', runner });
   await p.login();
   assert.equal(calls[0].opts.windowsHide, false);
-  assert.deepEqual(calls[0].args, ['login', '-p', 'cuenta2']);
+  assert.deepEqual(calls[0].args, ['login', '-p', 'cuenta2', '--clear', '--force']);
 });

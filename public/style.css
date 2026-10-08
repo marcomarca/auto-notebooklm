@@ -71,5 +71,9 @@ summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
 .numbering-toggle { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; color: #254c8b; background: #eef3fb; border: 1px solid #c8d9f4; border-radius: 6px; padding: 9px 13px; cursor: pointer; user-select: none; white-space: nowrap; }
 .numbering-toggle:hover { background: #e2edff; }
 .numbering-toggle input { width: auto; margin: 0; cursor: pointer; }
+.header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.inline-link { background: none; border: 0; padding: 0 2px; color: var(--blue); font-weight: 700; text-decoration: underline; cursor: pointer; font-size: inherit; }
+.inline-link:hover { color: #163c84; }
+
 
 

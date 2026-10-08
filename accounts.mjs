@@ -121,7 +121,7 @@ export class Accounts {
         if (!p.health.ready) { await this.check(id); if (!p.health.ready) throw new ProviderError(p.health.errorCode || 'UNAVAILABLE', p.health.error || 'Cuenta sin conexión.'); }
         let usage;
         try { usage = await p.usage(); p.health.usage = usage; }
-        catch (e) { if (['AUTH_REQUIRED', 'TEMPORARY', 'UNAVAILABLE', 'QUOTA'].includes(e.code) || id !== book.profile) throw e; p.health.usageWarning = redact(e.message); }
+        catch (e) { if (['AUTH_REQUIRED', 'TEMPORARY', 'UNAVAILABLE', 'QUOTA'].includes(e.code)) throw e; p.health.usageWarning = redact(e.message); }
         const retry = quotaRetry(usage, this.now());
         if (retry) { this.exhausted(id, retry); earliest = Math.min(earliest, retry); continue; }
         if (id !== book.profile) {
@@ -150,9 +150,11 @@ export class Accounts {
     const task = (async () => {
       try {
         await this.get(id).login();
+        this.loginProfile = null;
         await this.discover();
         await this.check(id);
       } catch (e) {
+        this.loginProfile = null;
         if (!this.closed) {
           const raw = e.message;
           this.store.update('accounts', id, { error: redact(raw), error_code: e.code || 'PROVIDER' });

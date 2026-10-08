@@ -145,8 +145,11 @@ export class Provider {
   async shareInvite(bookId, email, role = 'editor') {
     return this.cli(['share', 'invite', remoteId(bookId), email, '--role', role, '-p', this.profile]);
   }
-  async login() {
-    return this.cli(['login', '-p', this.profile], { parse: false, timeout: 360000, windowsHide: false });
+  async login({ clear = true, force = true } = {}) {
+    const args = ['login', '-p', this.profile];
+    if (clear) args.push('--clear');
+    if (force) args.push('--force');
+    return this.cli(args, { parse: false, timeout: 360000, windowsHide: false });
   }
   async createBook(name) {
     const r = await this.cli(['notebook', 'create', name, '--json', '-p', this.profile]);

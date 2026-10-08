@@ -22,7 +22,16 @@
       </div>
       <div class="feedback-track"><div id="feedback-fill" class="feedback-fill" style="width: 0%"></div></div>
     </div>
-    <header class="page-header"><div><h1 id="current-title">Del libro al podcast</h1><p id="subtitle">Una fuente. Un audio. Cada bloque conserva su lugar.</p></div><a id="remote-link" class="quiet link-button" target="_blank" rel="noopener noreferrer" hidden>Abrir en NotebookLM</a></header>
+    <header class="page-header">
+      <div>
+        <h1 id="current-title">Del libro al podcast</h1>
+        <p id="subtitle">Una fuente. Un audio. Cada bloque conserva su lugar.</p>
+      </div>
+      <div class="header-actions">
+        <button id="open-folder-btn" class="quiet link-button" type="button" title="Abrir carpeta de este libro en el Explorador de Windows" hidden>📁 Abrir carpeta MP3</button>
+        <a id="remote-link" class="quiet link-button" target="_blank" rel="noopener noreferrer" hidden>Abrir en NotebookLM</a>
+      </div>
+    </header>
     <div id="notice" role="status" aria-live="polite" hidden></div>
     <section id="welcome"><div class="book-shape" aria-hidden="true"><span>01</span><span>02</span><span>03</span></div><h2>Empieza con un libro</h2><p>Escribe su nombre a la izquierda. Después añade los capítulos como archivos Markdown o PDF.</p><p class="muted">Cada podcast se genera en español latinoamericano, con duración estándar, y se guarda automáticamente como MP3.</p></section>
     <section id="explorer" hidden>
@@ -97,7 +106,7 @@
       </div>
       <div id="quota" role="status" hidden></div>
       <div class="table-wrap"><table><thead><tr><th>Bloque</th><th>Fuente y título</th><th>Estado</th><th>Audio</th></tr></thead><tbody id="blocks"></tbody></table><div id="empty-blocks">Añade los archivos para preparar tus primeros bloques.</div></div>
-      <footer>Los archivos se guardan en la carpeta <strong>exports</strong> del proyecto. Puedes cerrar esta pestaña; mantén la aplicación ejecutándose para continuar.</footer>
+      <footer>Los archivos se guardan en la carpeta <button id="open-exports-btn" class="inline-link" type="button" title="Abrir carpeta exports en el Explorador de Windows">exports</button> del proyecto. Puedes cerrar esta pestaña; mantén la aplicación ejecutándose para continuar.</footer>
     </section>
   </main>
 </body>
