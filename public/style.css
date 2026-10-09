@@ -71,6 +71,11 @@ summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
 .numbering-toggle { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; color: #254c8b; background: #eef3fb; border: 1px solid #c8d9f4; border-radius: 6px; padding: 9px 13px; cursor: pointer; user-select: none; white-space: nowrap; }
 .numbering-toggle:hover { background: #e2edff; }
 .numbering-toggle input { width: auto; margin: 0; cursor: pointer; }
+.mode-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: #1e3a8a; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; padding: 4px 10px; }
+.mode-select { font-size: 13px; font-weight: 600; border: 1px solid #94a3b8; border-radius: 4px; padding: 4px 8px; background: #ffffff; color: #0f172a; cursor: pointer; }
+.mode-select:focus { outline: none; border-color: #2563eb; }
+.mode-tag { display: inline-block; font-size: 11px; font-weight: 700; background: #fef3c7; color: #92400e; border: 1px solid #fde68a; border-radius: 4px; padding: 2px 6px; margin-left: 6px; }
+.badge.deferred { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
 .header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .inline-link { background: none; border: 0; padding: 0 2px; color: var(--blue); font-weight: 700; text-decoration: underline; cursor: pointer; font-size: inherit; }
 .inline-link:hover { color: #163c84; }

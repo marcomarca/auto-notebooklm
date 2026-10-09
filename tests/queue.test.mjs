@@ -145,3 +145,26 @@ test('generaciones continuas: envía las solicitudes de audio una tras otra sin 
   assert.equal(f.store.block(one.id).state, 'done');
   assert.equal(f.store.block(two.id).state, 'done');
 });
+test('modo diferido (Generar más tarde): Provider invoca bridge con --later y la cola pasa a deferred', async t => {
+  const calls = [];
+  const runner = {
+    run: async (binary, args, options) => {
+      calls.push({ binary, args, options });
+      return JSON.stringify({ artifact_id: 'audio-defer-1', deferred: true });
+    },
+    close: async () => {}
+  };
+  const p = new Provider({ runner });
+  const artId = await p.generate('book-1', 'source-1', { defer: true });
+  assert.equal(artId, 'audio-defer-1');
+  assert.ok(calls[0].args.includes('--later'));
+
+  // Test en cola
+  const f = await fixture(t);
+  const block = f.add(1);
+  f.store.update('books', f.book.id, { remote_id: 'remote-book', state: 'ready', running: 1, generation_mode: 'later' });
+  f.store.update('blocks', block.id, { stage: 'generate', state: 'ready', source_id: 'src-1', generation_mode: 'later' });
+  await f.queue.tick();
+  assert.equal(f.store.block(block.id).state, 'deferred');
+  assert.equal(f.store.block(block.id).stage, 'poll');
+});

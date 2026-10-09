@@ -140,20 +140,24 @@ export class Queue {
       } else if (block.stage === 'generate') {
         if (block.baseline) return await this.reconcileAudio(book, block);
         if (!block.source_id) throw new ProviderError('REJECTED', 'Falta el ID de la fuente. No se generó audio.');
+        const mode = block.generation_mode || book.generation_mode || 'immediate';
+        const isLater = mode === 'later';
         if (this.accounts) {
           const candidate = await this.accounts.candidate(book, block.source_id);
-          if (!candidate.provider) return this.defer(book, block, candidate.retryAt, 'No hay una cuenta habilitada con sesión, acceso y cuota disponibles. Se comprobará automáticamente.');
-          provider = candidate.provider;
+          if (!candidate.provider && !isLater) return this.defer(book, block, candidate.retryAt, 'No hay una cuenta habilitada con sesión, acceso y cuota disponibles. Se comprobará automáticamente.');
+          if (candidate.provider) provider = candidate.provider;
         }
-        let usage;
-        try { if (!this.accounts) { usage = await provider.usage(); provider.health.usage = usage; } }
-        catch (e) {
-          if (['AUTH_REQUIRED', 'TEMPORARY', 'UNAVAILABLE'].includes(e.code)) throw e;
-          // An unavailable quota read is unknown, not exhausted. Respect any actual generation rejection.
-          provider.health.usageWarning = redact(e.message);
+        if (!isLater) {
+          let usage;
+          try { if (!this.accounts) { usage = await provider.usage(); provider.health.usage = usage; } }
+          catch (e) {
+            if (['AUTH_REQUIRED', 'TEMPORARY', 'UNAVAILABLE'].includes(e.code)) throw e;
+            // An unavailable quota read is unknown, not exhausted. Respect any actual generation rejection.
+            provider.health.usageWarning = redact(e.message);
+          }
+          const retryAt = quotaRetry(usage, this.now());
+          if (retryAt) return this.defer(book, block, retryAt);
         }
-        const retryAt = quotaRetry(usage, this.now());
-        if (retryAt) return this.defer(book, block, retryAt);
         const before = ids(await provider.artifacts(book.remote_id));
         // The pause may have arrived while the preflight request was running.
         if (!this.store.book(book.id).running) return;
@@ -161,8 +165,8 @@ export class Queue {
           (provider.profile !== book.profile && !this.store.get('SELECT profile FROM book_accounts WHERE book_id=? AND profile=?', book.id, provider.profile)))) return;
         this.store.update('books', book.id, { quota_at: 0, quota_error: null });
         this.store.update('blocks', block.id, { state: 'submitting', locked: 1, generation_profile: provider.profile, baseline: JSON.stringify(before), started_at: this.now() });
-        const artifactId = await provider.generate(book.remote_id, block.source_id);
-        this.store.update('blocks', block.id, { artifact_id: artifactId, baseline: null, state: 'generating', stage: 'poll', attempts: 0, next_at: this.now() + 15000, error: null, error_code: null });
+        const artifactId = await provider.generate(book.remote_id, block.source_id, { defer: isLater });
+        this.store.update('blocks', block.id, { artifact_id: artifactId, baseline: null, state: isLater ? 'deferred' : 'generating', stage: 'poll', attempts: 0, next_at: this.now() + 15000, error: null, error_code: null });
       } else if (block.stage === 'poll') {
         const rows = await provider.artifacts(book.remote_id, block.artifact_id);
         const audio = rows.find(a => (a.artifact_id || a.id) === block.artifact_id);
@@ -179,7 +183,15 @@ export class Queue {
           await mkdir(dir, { recursive: true }); await mkdir(join(this.dataDir, 'audio'), { recursive: true });
           this.store.update('blocks', block.id, { state: 'download', stage: 'download', next_at: 0, attempts: 0,
             original_path: original, output_path: target?.outputPath || join(dir, formatBlockOutputName(block, bookRow.numbering)), error: null, error_code: null });
-        } else this.store.update('blocks', block.id, { state: audio.status === 'queued' ? 'queued' : 'generating', poll_count: block.poll_count + 1, next_at: this.now() + Math.min(60000, 15000 * 2 ** Math.min(block.poll_count, 2)), attempts: 0, error: null, error_code: null });
+        } else {
+          const mode = block.generation_mode || book.generation_mode || 'immediate';
+          const isLater = mode === 'later';
+          const pollDelay = isLater
+            ? (block.poll_count < 2 ? 30000 : Math.min(15 * 60 * 1000, 60000 * 2 ** Math.min(block.poll_count - 2, 4)))
+            : Math.min(60000, 15000 * 2 ** Math.min(block.poll_count, 2));
+          const stateLabel = (audio.status === 'queued' || isLater) ? (isLater ? 'deferred' : 'queued') : 'generating';
+          this.store.update('blocks', block.id, { state: stateLabel, poll_count: block.poll_count + 1, next_at: this.now() + pollDelay, attempts: 0, error: null, error_code: null });
+        }
       } else if (block.stage === 'download') {
         if (!(await exists(block.original_path))) await provider.download(book.remote_id, block.artifact_id, block.original_path);
         this.store.update('blocks', block.id, { state: 'convert', stage: 'convert', next_at: 0, attempts: 0, error: null, error_code: null });

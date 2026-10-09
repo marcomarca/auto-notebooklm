@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const labels = { pending:'Pendiente', creating:'Creando libro', ready:'Fuente lista', upload_pending:'Por cargar', uploading:'Cargando fuente', source_processing:'Procesando fuente', submitting:'Solicitando audio', queued:'En cola de Google', generating:'Generando', download:'Descargando', convert:'Convirtiendo a MP3', done:'MP3 listo', quota:'Esperando cuota (Generar más tarde)', review:'Revisión necesaria', auth:'Iniciar sesión', error:'Error' };
+const labels = { pending:'Pendiente', creating:'Creando libro', ready:'Fuente lista', upload_pending:'Por cargar', uploading:'Cargando fuente', source_processing:'Procesando fuente', submitting:'Solicitando audio', queued:'En cola de Google', deferred:'En cola diferida (ahorra cuota)', generating:'Generando', download:'Descargando', convert:'Convirtiendo a MP3', done:'MP3 listo', quota:'Esperando cuota (Generar más tarde)', review:'Revisión necesaria', auth:'Iniciar sesión', error:'Error' };
 let token, books = [], selected = localStorage.getItem('selected-book'), uploading = false, lastRender = '', refreshing = false;
 let createRequest = crypto.randomUUID();
 let accountData = { accounts: [] }, accountStamp = '', backupStamp = '', savingBackups = false;
@@ -404,6 +404,7 @@ function render() {
   $('pulse-indicator').className = pulseClass;
 
   $('book-numbering').checked = book.numbering !== false;
+  if ($('generation-mode')) $('generation-mode').value = book.generation_mode || 'immediate';
   $('generate').textContent = book.running ? 'Cola en marcha' : book.blocks.some(b=>b.locked && b.state !== 'done') ? 'Reanudar pendientes' : 'Generar audios pendientes';
   $('generate').disabled = book.running || book.blocks.every(b=>b.state === 'done') || !book.remoteId || uploading;
   $('pause').disabled = !book.running;
@@ -441,6 +442,7 @@ function render() {
       badge.textContent = labels[block.state] || block.state;
     }
     state.append(badge);
+    if (block.generation_mode === 'later' || block.state === 'deferred') state.append(el('span', { class: 'mode-tag' }, '⏳ Diferido'));
     if (block.generationProfile) state.append(el('div', { class: 'account-tag' }, `Cuenta: ${block.generationProfile}`));
     if (block.error) state.append(el('div',{class:'block-error'},block.error));
     if (block.nextAt) state.append(el('div',{class:'next-at'},`Próximo intento: ${date(block.nextAt)}`));
@@ -525,7 +527,11 @@ $('open-exports-btn')?.addEventListener('click', () => {
     notice(`Carpeta exports abierta en el Explorador de Windows: ${res.path}`);
   });
 });
-$('generate').addEventListener('click',()=>act(()=>api(`/api/books/${selected}/queue`,{method:'POST',data:{action:'start'}})));
+$('generation-mode')?.addEventListener('change', () => {
+  if (!selected) return;
+  act(() => api(`/api/books/${selected}/mode`, { method: 'PATCH', data: { mode: $('generation-mode').value } }));
+});
+$('generate').addEventListener('click',()=>act(()=>api(`/api/books/${selected}/queue`,{method:'POST',data:{action:'start',mode:$('generation-mode')?.value || 'immediate'}})));
 $('pause').addEventListener('click',()=>act(()=>api(`/api/books/${selected}/queue`,{method:'POST',data:{action:'pause'}})));
 async function addFiles(list) {
   if (uploading || !selected) return;

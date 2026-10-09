@@ -87,10 +87,21 @@ function array(value, key) {
 }
 
 export class Provider {
-  constructor({ profile = 'default', runner = new CommandRunner(), nlm = process.env.NLM_BINARY || 'nlm', ffmpeg = process.env.FFMPEG_BINARY || 'ffmpeg' } = {}) {
+  constructor({ profile = 'default', runner = new CommandRunner(), nlm = process.env.NLM_BINARY || 'nlm', ffmpeg = process.env.FFMPEG_BINARY || 'ffmpeg', python = process.env.PYTHON_BINARY || (process.platform === 'win32' ? (process.env.APPDATA ? `${process.env.APPDATA}\\uv\\tools\\notebooklm-mcp-cli\\Scripts\\python.exe` : 'python') : 'python3'), bridgeScript = process.env.NLM_BRIDGE_SCRIPT || './scripts/nlm_bridge.py' } = {}) {
     if (!/^[\w-]{1,80}$/.test(profile)) throw new Error('NLM_PROFILE inválido.');
     this.profile = profile; this.runner = runner; this.nlm = nlm; this.ffmpeg = ffmpeg;
+    this.python = python; this.bridgeScript = bridgeScript;
     this.health = { ready: false, profile, cli: false, ffmpeg: false, auth: false, error: 'Comprobando conexión…' };
+  }
+  async bridge(args, { parse = true, timeout = 120000, windowsHide = true } = {}) {
+    const stdout = await this.runner.run(this.python, [this.bridgeScript, ...args], { timeout, windowsHide, env: { NLM_PROFILE: this.profile, NO_COLOR: '1', TERM: 'dumb', COLUMNS: '240' } });
+    const result = parse ? json(stdout) : stdout;
+    if (parse && result?.error) {
+      const raw = result.error;
+      const message = redact(typeof raw === 'object' ? (raw.error || raw.message || JSON.stringify(raw)) : String(raw));
+      throw new ProviderError(classify(message), message);
+    }
+    return result;
   }
   async cli(args, { parse = true, timeout = 120000, windowsHide = true } = {}) {
     const stdout = await this.runner.run(this.nlm, args, { timeout, windowsHide, env: { NLM_PROFILE: this.profile, NO_COLOR: '1', TERM: 'dumb', COLUMNS: '240' } });
@@ -192,11 +203,17 @@ export class Provider {
     }
     return all;
   }
-  async generate(bookId, sourceId) {
+  async generate(bookId, sourceId, { defer = false } = {}) {
     // Never let the CLI's omitted-source default broaden this to the whole notebook.
     const source = remoteId(sourceId);
-    const r = await this.cli(['audio', 'create', remoteId(bookId), '--source-ids', source, '--format', 'deep_dive',
-      '--length', 'default', '--language', 'es-419', '--confirm', '--json', '-p', this.profile]);
+    let r;
+    if (defer) {
+      r = await this.bridge(['audio', 'create', remoteId(bookId), '--source-ids', source, '--format', 'deep_dive',
+        '--length', 'default', '--language', 'es-419', '--later', '--confirm', '--json', '-p', this.profile]);
+    } else {
+      r = await this.cli(['audio', 'create', remoteId(bookId), '--source-ids', source, '--format', 'deep_dive',
+        '--length', 'default', '--language', 'es-419', '--confirm', '--json', '-p', this.profile]);
+    }
     return remoteId(r.artifact_id);
   }
   async download(bookId, artifactId, destination) {

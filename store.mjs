@@ -68,9 +68,13 @@ export class Store {
       this.db.exec('ALTER TABLE blocks ADD COLUMN generation_profile TEXT');
     if (!this.all('PRAGMA table_info(books)').some(c => c.name === 'numbering'))
       this.db.exec('ALTER TABLE books ADD COLUMN numbering INTEGER NOT NULL DEFAULT 1');
+    if (!this.all('PRAGMA table_info(blocks)').some(c => c.name === 'generation_mode'))
+      this.db.exec("ALTER TABLE blocks ADD COLUMN generation_mode TEXT NOT NULL DEFAULT 'immediate'");
+    if (!this.all('PRAGMA table_info(books)').some(c => c.name === 'generation_mode'))
+      this.db.exec("ALTER TABLE books ADD COLUMN generation_mode TEXT NOT NULL DEFAULT 'immediate'");
     this.db.exec(`UPDATE blocks SET generation_profile=(SELECT profile FROM books WHERE books.id=blocks.book_id)
       WHERE generation_profile IS NULL AND (artifact_id IS NOT NULL OR (stage='generate' AND baseline IS NOT NULL));
-      PRAGMA user_version=3;`);
+      PRAGMA user_version=4;`);
   }
   all(sql, ...args) { return this.db.prepare(sql).all(...args); }
   get(sql, ...args) { return this.db.prepare(sql).get(...args); }

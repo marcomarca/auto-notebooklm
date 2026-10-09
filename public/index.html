@@ -100,6 +100,13 @@
         </div>
         <div class="actions">
           <label class="numbering-toggle" title="Incluir prefijo de número en los nombres de archivo MP3 (ej.: 001 - Título.mp3)"><input type="checkbox" id="book-numbering" checked><span>Numerar archivos</span></label>
+          <label class="mode-toggle" title="Elige si deseas consumir tu cuota ahora o programar para después sin gastar límite actual">
+            <span>Modo:</span>
+            <select id="generation-mode" class="mode-select">
+              <option value="immediate">⚡ Generar ahora (usa cuota)</option>
+              <option value="later">⏳ Generar más tarde (ahorra cuota)</option>
+            </select>
+          </label>
           <button id="pause" class="quiet">Pausar</button>
           <button id="generate">Generar audios pendientes</button>
         </div>

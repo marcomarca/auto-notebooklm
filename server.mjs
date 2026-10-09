@@ -320,10 +320,18 @@ export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(
           return send(res, 200, { ok: true, numbering: numbering !== false, book: store.snapshot().find(b => b.id === book.id) });
         }
         if (parts[3] === 'queue' && req.method === 'POST') {
-          const { action } = await body(req);
+          const { action, mode } = await body(req);
           if (!['start', 'pause', 'resume'].includes(action)) throw new Error('Acción de cola inválida.');
-          store.update('books', book.id, { running: action === 'pause' ? 0 : 1 });
+          const updates = { running: action === 'pause' ? 0 : 1 };
+          if (mode && ['immediate', 'later'].includes(mode)) updates.generation_mode = mode;
+          store.update('books', book.id, updates);
           return send(res, 200, { ok: true });
+        }
+        if (parts[3] === 'mode' && req.method === 'PATCH') {
+          const { mode } = await body(req);
+          if (!['immediate', 'later'].includes(mode)) throw new Error('Modo de generación inválido.');
+          store.update('books', book.id, { generation_mode: mode });
+          return send(res, 200, { ok: true, mode });
         }
         if (parts[3] === 'open-folder' && req.method === 'POST') {
           const dir = resolve(join(exportsDir, exportDirName(book)));
@@ -343,10 +351,20 @@ export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(
         const block = store.block(parts[2]);
         if (!block) return send(res, 404, { error: 'Bloque inexistente.' });
         if (parts.length === 3 && req.method === 'PATCH') {
-          const name = title((await body(req)).title);
-          if (block.locked) throw new Error('El título ya está fijado para este audio.');
-          store.update('blocks', block.id, { title: name });
-          store.updateBlockOutputPaths(block.book_id, exportsDir, { renameFiles: true });
+          const b = await body(req);
+          const updates = {};
+          if (b.title !== undefined) {
+            if (block.locked) throw new Error('El título ya está fijado para este audio.');
+            updates.title = title(b.title);
+          }
+          if (b.mode !== undefined) {
+            if (!['immediate', 'later'].includes(b.mode)) throw new Error('Modo de generación inválido.');
+            updates.generation_mode = b.mode;
+          }
+          if (Object.keys(updates).length) {
+            store.update('blocks', block.id, updates);
+            if (updates.title) store.updateBlockOutputPaths(block.book_id, exportsDir, { renameFiles: true });
+          }
           return send(res, 200, { ok: true });
         }
         if (parts[3] === 'retry' && req.method === 'POST') { queue.retryBlock(block.id); return send(res, 200, { ok: true }); }
