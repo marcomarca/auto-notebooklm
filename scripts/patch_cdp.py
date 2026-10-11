@@ -1,8 +1,31 @@
 import os
+import sys
 
-cdp_path = r'C:\Users\Rescate\AppData\Roaming\uv\tools\notebooklm-mcp-cli\Lib\site-packages\notebooklm_tools\utils\cdp.py'
+if len(sys.argv) > 1:
+    target = sys.argv[1]
+    if os.path.isfile(target):
+        cdp_path = target
+    else:
+        found = None
+        for root_dir, _, files in os.walk(target):
+            if "cdp.py" in files and os.path.basename(root_dir) == "utils":
+                found = os.path.join(root_dir, "cdp.py")
+                break
+        if not found:
+            sys.stderr.write(f"Error: cdp.py not found in {target}\n")
+            sys.exit(1)
+        cdp_path = found
+else:
+    try:
+        import notebooklm_tools.utils.cdp as cdp_mod
+        cdp_path = cdp_mod.__file__
+    except ImportError:
+        sys.stderr.write("Error: specify path to runtime or cdp.py as argument.\n")
+        sys.exit(1)
+
 with open(cdp_path, 'r', encoding='utf-8') as f:
     content = f.read()
+
 
 old_block = """def _wait_for_page_ready(ws_url: str, timeout: int = 30) -> tuple[str, bool]:
     \"\"\"Poll until NotebookLM page is fully loaded (session tokens in DOM).
@@ -156,5 +179,8 @@ if old_block in content:
     with open(cdp_path, 'w', encoding='utf-8') as f:
         f.write(content)
     print("SUCCESS: cdp.py patched")
+elif new_block in content:
+    print("ALREADY_PATCHED: cdp.py already contains patch")
 else:
-    print("ERROR: old_block not found in cdp.py")
+    print("WARNING: old_block not found in cdp.py (possibly upstream code changed)")
+

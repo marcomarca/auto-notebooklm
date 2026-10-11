@@ -1,0 +1,38 @@
+appId: com.autonotebooklm.desktop
+productName: AutoNotebookLM
+
+asar: true
+
+files:
+  - "**/*"
+  - "!runtime/**"
+  - "!build/runtime-bootstrap/**"
+  - "!dist/**"
+  - "!data/**"
+  - "!exports/**"
+
+extraResources:
+  - from: "build/runtime-bootstrap"
+    to: "runtime-bootstrap"
+  - from: "vendor/ffmpeg"
+    to: "ffmpeg"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: true
+  perMachine: false
+  deleteAppDataOnUninstall: false
+  differentialPackage: "store-asar"
+  artifactName: "AutoNotebookLM-Setup-${version}.${ext}"
+
+electronUpdaterCompatibility: ">=2.16"
+
+publish:
+  provider: github
+  owner: OWNER
+  repo: auto-notebooklm-releases

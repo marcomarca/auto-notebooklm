@@ -87,11 +87,38 @@ function array(value, key) {
 }
 
 export class Provider {
-  constructor({ profile = 'default', runner = new CommandRunner(), nlm = process.env.NLM_BINARY || 'nlm', ffmpeg = process.env.FFMPEG_BINARY || 'ffmpeg', python = process.env.PYTHON_BINARY || (process.platform === 'win32' ? (process.env.APPDATA ? `${process.env.APPDATA}\\uv\\tools\\notebooklm-mcp-cli\\Scripts\\python.exe` : 'python') : 'python3'), bridgeScript = process.env.NLM_BRIDGE_SCRIPT || './scripts/nlm_bridge.py' } = {}) {
+  constructor({
+    profile = 'default',
+    runner = new CommandRunner(),
+    nlm = process.env.NLM_BINARY || 'nlm',
+    nlmBinary,
+    nlmPrefixArgs = [],
+    ffmpeg = process.env.FFMPEG_BINARY || 'ffmpeg',
+    python = process.env.PYTHON_BINARY || (process.platform === 'win32' ? (process.env.APPDATA ? `${process.env.APPDATA}\\uv\\tools\\notebooklm-mcp-cli\\Scripts\\python.exe` : 'python') : 'python3'),
+    bridgeScript = process.env.NLM_BRIDGE_SCRIPT || './scripts/nlm_bridge.py',
+  } = {}) {
     if (!/^[\w-]{1,80}$/.test(profile)) throw new Error('NLM_PROFILE inválido.');
-    this.profile = profile; this.runner = runner; this.nlm = nlm; this.ffmpeg = ffmpeg;
-    this.python = python; this.bridgeScript = bridgeScript;
+    this.profile = profile;
+    this.runner = runner;
+    this.nlmBinary = nlmBinary || nlm;
+    this.nlm = this.nlmBinary;
+    this.nlmPrefixArgs = Array.isArray(nlmPrefixArgs) ? [...nlmPrefixArgs] : [];
+    this.ffmpeg = ffmpeg;
+    this.python = python;
+    this.bridgeScript = bridgeScript;
     this.health = { ready: false, profile, cli: false, ffmpeg: false, auth: false, error: 'Comprobando conexión…' };
+  }
+  forProfile(profile) {
+    return new Provider({
+      profile,
+      runner: this.runner,
+      nlmBinary: this.nlmBinary,
+      nlm: this.nlmBinary,
+      nlmPrefixArgs: this.nlmPrefixArgs,
+      ffmpeg: this.ffmpeg,
+      python: this.python,
+      bridgeScript: this.bridgeScript,
+    });
   }
   async bridge(args, { parse = true, timeout = 120000, windowsHide = true } = {}) {
     const stdout = await this.runner.run(this.python, [this.bridgeScript, ...args], { timeout, windowsHide, env: { NLM_PROFILE: this.profile, NO_COLOR: '1', TERM: 'dumb', COLUMNS: '240' } });
@@ -104,7 +131,8 @@ export class Provider {
     return result;
   }
   async cli(args, { parse = true, timeout = 120000, windowsHide = true } = {}) {
-    const stdout = await this.runner.run(this.nlm, args, { timeout, windowsHide, env: { NLM_PROFILE: this.profile, NO_COLOR: '1', TERM: 'dumb', COLUMNS: '240' } });
+    const fullArgs = [...this.nlmPrefixArgs, ...args];
+    const stdout = await this.runner.run(this.nlmBinary, fullArgs, { timeout, windowsHide, env: { NLM_PROFILE: this.profile, NO_COLOR: '1', TERM: 'dumb', COLUMNS: '240' } });
     const result = parse ? json(stdout) : stdout;
     if (parse && result?.error) {
       const raw = result.error;

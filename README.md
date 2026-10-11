@@ -12,21 +12,31 @@ npm start
 
 No hace falta `npm install`: se utilizan las bibliotecas incluidas en Node.js.
 
-Requisitos: Node.js **24**, `notebooklm-mcp-cli` **0.12.0**, FFmpeg con `libmp3lame`, y sesión de NotebookLM. La aplicación comprueba estos requisitos y bloquea nuevas operaciones remotas hasta completar la comprobación.
+## Requisitos
+
+**Versión Desktop instalable (Windows x64):**
+Requisito: Windows x64.
+AutoNotebookLM incluye de forma integrada:
+- Electron / Node.js
+- Python privado
+- Conector NotebookLM compatible (`0.12.0`)
+- FFmpeg con soporte `libmp3lame`
+
+## Desarrollo desde código fuente
+
+Si ejecutas la aplicación directamente en modo desarrollo sin el instalador:
+- Node.js **24**
+- `notebooklm-mcp-cli` **0.12.0**
+- FFmpeg con `libmp3lame`
+- Sesión iniciada de NotebookLM
 
 ```powershell
-node --version
-nlm --version
-ffmpeg -version
-nlm login -p default
+npm install
+npm test
+npm run desktop   # Iniciar aplicación de escritorio Electron
+npm start         # Iniciar backend para navegador web
 ```
 
-Para otro perfil ya configurado, establece `NLM_PROFILE` antes de iniciar. No cambia el perfil predeterminado global del conector. Puedes establecer `PORT`, `NLM_BINARY` y `FFMPEG_BINARY` si necesitas otro puerto o rutas explícitas.
-
-```powershell
-$env:NLM_PROFILE = 'cuenta2'
-.\start-app.ps1
-```
 
 ## Uso
 

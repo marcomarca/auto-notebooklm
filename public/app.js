@@ -555,5 +555,54 @@ const drop=$('drop-zone');
 for(const event of ['dragenter','dragover']) drop.addEventListener(event,e=>{e.preventDefault();drop.classList.add('dragging');});
 for(const event of ['dragleave','drop']) drop.addEventListener(event,e=>{e.preventDefault();drop.classList.remove('dragging');});
 drop.addEventListener('drop',event=>addFiles(event.dataTransfer.files));
-drop.addEventListener('keydown',event=>{if(['Enter',' '].includes(event.key)){event.preventDefault();$('files').click();}});
 refresh(); setInterval(refresh,2000);
+
+function initDesktopUpdates() {
+  if (!window.desktop) return;
+  const banner = $('desktop-update-banner');
+  const text = $('update-banner-text');
+  const btn = $('update-install-button');
+  if (!banner || !text || !btn) return;
+
+  function renderUpdateState(state) {
+    if (!state || state.status === 'idle' || state.status === 'not-available') {
+      banner.hidden = true;
+      btn.hidden = true;
+      return;
+    }
+    banner.hidden = false;
+    if (state.status === 'checking') {
+      text.textContent = 'Buscando actualización…';
+      btn.hidden = true;
+    } else if (state.status === 'available') {
+      text.textContent = `Actualización ${state.version || ''} disponible…`;
+      btn.hidden = true;
+    } else if (state.status === 'downloading') {
+      text.textContent = `Descargando ${state.version || ''} — ${state.percent || 0} %`;
+      btn.hidden = true;
+    } else if (state.status === 'downloaded') {
+      text.textContent = `Actualización ${state.version || ''} lista`;
+      btn.hidden = false;
+    } else if (state.status === 'error') {
+      text.textContent = `Error buscando actualización: ${state.error || 'Desconocido'}`;
+      btn.hidden = true;
+    }
+  }
+
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    btn.textContent = 'Cerrando y aplicando…';
+    try {
+      await window.desktop.installUpdate();
+    } catch (err) {
+      alert(`Error al reiniciar: ${err.message}`);
+      btn.disabled = false;
+      btn.textContent = 'Reiniciar y actualizar';
+    }
+  });
+
+  window.desktop.getUpdateState?.().then(renderUpdateState).catch(() => {});
+  window.desktop.onUpdateState?.(renderUpdateState);
+}
+initDesktopUpdates();
+

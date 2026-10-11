@@ -80,5 +80,39 @@ summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
 .inline-link { background: none; border: 0; padding: 0 2px; color: var(--blue); font-weight: 700; text-decoration: underline; cursor: pointer; font-size: inherit; }
 .inline-link:hover { color: #163c84; }
 
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e40af;
+  padding: 10px 16px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.update-install-btn {
+  background: #2563eb;
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .2s;
+}
+.update-install-btn:hover {
+  background: #1d4ed8;
+}
+.update-install-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+
 
 

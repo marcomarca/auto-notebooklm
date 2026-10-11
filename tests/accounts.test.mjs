@@ -198,3 +198,36 @@ test('Provider.login ejecuta comando sin ocultar ventana y extrae errores JSON l
   assert.equal(calls[0].opts.windowsHide, false);
   assert.deepEqual(calls[0].args, ['login', '-p', 'cuenta2', '--clear', '--force']);
 });
+
+test('Provider.forProfile y Accounts conservan runtime personalizado', async () => {
+  const runner = { run: async () => '{}', close: async () => {} };
+  const primary = new Provider({
+    profile: 'default',
+    runner,
+    nlmBinary: 'C:\\custom\\python.exe',
+    nlmPrefixArgs: ['C:\\custom\\nlm_entry.py'],
+    ffmpeg: 'C:\\custom\\ffmpeg.exe',
+    python: 'C:\\custom\\python.exe',
+    bridgeScript: 'C:\\custom\\bridge.py'
+  });
+
+  const secondary = primary.forProfile('cuenta2');
+  assert.equal(secondary.profile, 'cuenta2');
+  assert.equal(secondary.nlmBinary, 'C:\\custom\\python.exe');
+  assert.deepEqual(secondary.nlmPrefixArgs, ['C:\\custom\\nlm_entry.py']);
+  assert.equal(secondary.ffmpeg, 'C:\\custom\\ffmpeg.exe');
+  assert.equal(secondary.python, 'C:\\custom\\python.exe');
+  assert.equal(secondary.bridgeScript, 'C:\\custom\\bridge.py');
+
+  const store = {
+    db: { prepare: () => ({ run: () => {} }) },
+    get: () => ({ id: 'cuenta2', enabled: 1 }),
+    all: () => []
+  };
+  const accounts = new Accounts(store, primary);
+  const providerCuenta2 = accounts.get('cuenta2');
+  assert.equal(providerCuenta2.profile, 'cuenta2');
+  assert.equal(providerCuenta2.nlmBinary, 'C:\\custom\\python.exe');
+  assert.deepEqual(providerCuenta2.nlmPrefixArgs, ['C:\\custom\\nlm_entry.py']);
+});
+

@@ -9,7 +9,7 @@ export function profileId(value) {
 export class Accounts {
   constructor(store, primary, { factory, now = Date.now } = {}) {
     this.store = store; this.primary = primary; this.now = now;
-    this.factory = factory || (profile => new Provider({ profile, nlm: primary.nlm, ffmpeg: primary.ffmpeg }));
+    this.factory = factory || (profile => (primary.forProfile ? primary.forProfile(profile) : new Provider({ profile, nlm: primary.nlm, ffmpeg: primary.ffmpeg })));
     this.providers = new Map([[primary.profile, primary]]); this.checks = new Map(); this.tasks = new Set();
     this.ensure(primary.profile);
     this.current = store.get("SELECT value FROM settings WHERE key='profile'")?.value || primary.profile;

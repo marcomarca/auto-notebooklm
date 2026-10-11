@@ -74,7 +74,7 @@ function requestId(value) {
   return value;
 }
 
-export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(root, 'exports'), provider = new Provider({ profile: process.env.NLM_PROFILE || 'default' }), accountFactory, port = Number(process.env.PORT || 4318), worker = true, check = true } = {}) {
+export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(root, 'exports'), provider = new Provider({ profile: process.env.NLM_PROFILE || 'default' }), accountFactory, port = Number(process.env.PORT || 4318), worker = true, check = true, allowHttpShutdown = true } = {}) {
   await mkdir(dataDir, { recursive: true });
   const releaseLock = await acquireLock(dataDir);
   let store;
@@ -162,6 +162,7 @@ export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(
       const url = new URL(req.url, origin);
       const parts = url.pathname.split('/').filter(Boolean);
       if (req.method === 'POST' && url.pathname === '/api/shutdown') {
+        if (!allowHttpShutdown) return send(res, 403, { error: 'Apagado por HTTP deshabilitado en esta instancia.' });
         send(res, 200, { ok: true });
         setImmediate(async () => {
           try { await shutdown(); }

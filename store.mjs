@@ -31,50 +31,95 @@ export class Store {
   constructor(file) {
     mkdirSync(dirname(file), { recursive: true });
     this.db = new DatabaseSync(file);
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
-      CREATE TABLE IF NOT EXISTS books (
-        id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, title TEXT NOT NULL,
-        remote_title TEXT NOT NULL, remote_id TEXT, profile TEXT NOT NULL,
-        numbering INTEGER NOT NULL DEFAULT 1,
-        state TEXT NOT NULL DEFAULT 'pending', running INTEGER NOT NULL DEFAULT 0,
-        error TEXT, error_code TEXT, baseline TEXT, started_at INTEGER,
-        attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0,
-        quota_at INTEGER NOT NULL DEFAULT 0, quota_error TEXT,
-        created_at INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS blocks (
-        id TEXT PRIMARY KEY, book_id TEXT NOT NULL REFERENCES books(id),
-        request_id TEXT NOT NULL, position INTEGER NOT NULL, title TEXT NOT NULL,
-        filename TEXT NOT NULL, file_path TEXT NOT NULL, hash TEXT NOT NULL,
-        source_title TEXT NOT NULL, source_id TEXT, artifact_id TEXT,
-        state TEXT NOT NULL DEFAULT 'upload_pending', stage TEXT NOT NULL DEFAULT 'upload',
-        locked INTEGER NOT NULL DEFAULT 0, error TEXT, error_code TEXT,
-        attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0,
-        poll_count INTEGER NOT NULL DEFAULT 0, baseline TEXT, started_at INTEGER,
-        output_path TEXT, original_path TEXT, created_at INTEGER NOT NULL,
-        UNIQUE(book_id, request_id)
-      ); CREATE UNIQUE INDEX IF NOT EXISTS blocks_content ON blocks(book_id,hash);
-      PRAGMA user_version=1;`);
-    this.db.exec(`CREATE TABLE IF NOT EXISTS accounts (
-      id TEXT PRIMARY KEY, email TEXT, enabled INTEGER NOT NULL DEFAULT 0,
-      retry_at INTEGER NOT NULL DEFAULT 0, error TEXT, error_code TEXT
-    );
-    CREATE TABLE IF NOT EXISTS book_accounts (
-      book_id TEXT NOT NULL REFERENCES books(id), profile TEXT NOT NULL,
-      PRIMARY KEY(book_id, profile)
-    );
-    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
-    if (!this.all('PRAGMA table_info(blocks)').some(c => c.name === 'generation_profile'))
-      this.db.exec('ALTER TABLE blocks ADD COLUMN generation_profile TEXT');
-    if (!this.all('PRAGMA table_info(books)').some(c => c.name === 'numbering'))
-      this.db.exec('ALTER TABLE books ADD COLUMN numbering INTEGER NOT NULL DEFAULT 1');
-    if (!this.all('PRAGMA table_info(blocks)').some(c => c.name === 'generation_mode'))
-      this.db.exec("ALTER TABLE blocks ADD COLUMN generation_mode TEXT NOT NULL DEFAULT 'immediate'");
-    if (!this.all('PRAGMA table_info(books)').some(c => c.name === 'generation_mode'))
-      this.db.exec("ALTER TABLE books ADD COLUMN generation_mode TEXT NOT NULL DEFAULT 'immediate'");
-    this.db.exec(`UPDATE blocks SET generation_profile=(SELECT profile FROM books WHERE books.id=blocks.book_id)
-      WHERE generation_profile IS NULL AND (artifact_id IS NOT NULL OR (stage='generate' AND baseline IS NOT NULL));
-      PRAGMA user_version=4;`);
+    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
+    this.migrate();
+  }
+  getUserVersion() {
+    return Number(this.db.prepare('PRAGMA user_version').get()?.user_version || 0);
+  }
+  migrate() {
+    let version = this.getUserVersion();
+    if (version < 1) {
+      this.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS books (
+            id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, title TEXT NOT NULL,
+            remote_title TEXT NOT NULL, remote_id TEXT, profile TEXT NOT NULL,
+            numbering INTEGER NOT NULL DEFAULT 1,
+            state TEXT NOT NULL DEFAULT 'pending', running INTEGER NOT NULL DEFAULT 0,
+            error TEXT, error_code TEXT, baseline TEXT, started_at INTEGER,
+            attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0,
+            quota_at INTEGER NOT NULL DEFAULT 0, quota_error TEXT,
+            created_at INTEGER NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS blocks (
+            id TEXT PRIMARY KEY, book_id TEXT NOT NULL REFERENCES books(id),
+            request_id TEXT NOT NULL, position INTEGER NOT NULL, title TEXT NOT NULL,
+            filename TEXT NOT NULL, file_path TEXT NOT NULL, hash TEXT NOT NULL,
+            source_title TEXT NOT NULL, source_id TEXT, artifact_id TEXT,
+            state TEXT NOT NULL DEFAULT 'upload_pending', stage TEXT NOT NULL DEFAULT 'upload',
+            locked INTEGER NOT NULL DEFAULT 0, error TEXT, error_code TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0,
+            poll_count INTEGER NOT NULL DEFAULT 0, baseline TEXT, started_at INTEGER,
+            output_path TEXT, original_path TEXT, created_at INTEGER NOT NULL,
+            UNIQUE(book_id, request_id)
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS blocks_content ON blocks(book_id,hash);
+          CREATE TABLE IF NOT EXISTS accounts (
+            id TEXT PRIMARY KEY, email TEXT, enabled INTEGER NOT NULL DEFAULT 0,
+            retry_at INTEGER NOT NULL DEFAULT 0, error TEXT, error_code TEXT
+          );
+          CREATE TABLE IF NOT EXISTS book_accounts (
+            book_id TEXT NOT NULL REFERENCES books(id), profile TEXT NOT NULL,
+            PRIMARY KEY(book_id, profile)
+          );
+          CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        `);
+        this.db.exec('PRAGMA user_version = 1;');
+      });
+      version = 1;
+    }
+
+    if (version < 2) {
+      this.transaction(() => {
+        const columns = this.all('PRAGMA table_info(blocks)').map(c => c.name);
+        if (!columns.includes('generation_profile')) {
+          this.db.exec('ALTER TABLE blocks ADD COLUMN generation_profile TEXT');
+        }
+        this.db.exec(`
+          UPDATE blocks SET generation_profile=(SELECT profile FROM books WHERE books.id=blocks.book_id)
+          WHERE generation_profile IS NULL AND (artifact_id IS NOT NULL OR (stage='generate' AND baseline IS NOT NULL));
+        `);
+        this.db.exec('PRAGMA user_version = 2;');
+      });
+      version = 2;
+    }
+
+    if (version < 3) {
+      this.transaction(() => {
+        const columns = this.all('PRAGMA table_info(books)').map(c => c.name);
+        if (!columns.includes('numbering')) {
+          this.db.exec('ALTER TABLE books ADD COLUMN numbering INTEGER NOT NULL DEFAULT 1');
+        }
+        this.db.exec('PRAGMA user_version = 3;');
+      });
+      version = 3;
+    }
+
+    if (version < 4) {
+      this.transaction(() => {
+        const blockCols = this.all('PRAGMA table_info(blocks)').map(c => c.name);
+        if (!blockCols.includes('generation_mode')) {
+          this.db.exec("ALTER TABLE blocks ADD COLUMN generation_mode TEXT NOT NULL DEFAULT 'immediate'");
+        }
+        const bookCols = this.all('PRAGMA table_info(books)').map(c => c.name);
+        if (!bookCols.includes('generation_mode')) {
+          this.db.exec("ALTER TABLE books ADD COLUMN generation_mode TEXT NOT NULL DEFAULT 'immediate'");
+        }
+        this.db.exec('PRAGMA user_version = 4;');
+      });
+      version = 4;
+    }
   }
   all(sql, ...args) { return this.db.prepare(sql).all(...args); }
   get(sql, ...args) { return this.db.prepare(sql).get(...args); }
