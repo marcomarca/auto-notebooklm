@@ -171,7 +171,7 @@ export class Queue {
         const rows = await provider.artifacts(book.remote_id, block.artifact_id);
         const audio = rows.find(a => (a.artifact_id || a.id) === block.artifact_id);
         if (!audio) throw new ProviderError('TEMPORARY', 'El audio todavía no aparece en NotebookLM.');
-        if (audio.source_ids?.length && (audio.source_ids.length !== 1 || audio.source_ids[0] !== block.source_id))
+        if (!block.hash?.startsWith('remote-') && audio.source_ids?.length && (audio.source_ids.length !== 1 || audio.source_ids[0] !== block.source_id))
           throw new ProviderError('REVIEW', 'El audio informa fuentes distintas al bloque. Descarga detenida para revisión.');
         if (['failed', 'error'].includes(audio.status)) throw new ProviderError('ARTIFACT_FAILED', redact(audio.error_reason || 'NotebookLM no pudo generar el audio.'));
         if (['completed', 'ready'].includes(audio.status)) {
@@ -250,7 +250,8 @@ export class Queue {
     if (!block) throw new Error('Bloque inexistente.');
     if (!['error', 'review', 'auth', 'quota'].includes(block.state)) return;
     const changes = { state: block.baseline ? (block.stage === 'upload' ? 'uploading' : 'submitting') : ({ upload: 'upload_pending', source: 'source_processing', generate: 'ready', poll: 'generating', download: 'download', convert: 'convert' }[block.stage]), attempts: 0, next_at: 0, error: null, error_code: null };
-    if (block.error_code === 'ARTIFACT_FAILED') Object.assign(changes, { stage: 'generate', state: 'ready', artifact_id: null, baseline: null });
+    if (block.error_code === 'ARTIFACT_FAILED' && !block.hash?.startsWith('remote-')) Object.assign(changes, { stage: 'generate', state: 'ready', artifact_id: null, baseline: null });
+    else if (block.error_code === 'ARTIFACT_FAILED' && block.hash?.startsWith('remote-')) Object.assign(changes, { stage: 'download', state: 'download' });
     this.store.update('blocks', id, changes);
     if (block.state === 'quota') this.store.update('books', block.book_id, { quota_at: 0, quota_error: null });
   }

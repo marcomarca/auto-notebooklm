@@ -285,10 +285,11 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
             let importedCount = 0;
             for (const artId of artifactIds) {
               const art = artMap.get(artId);
-              const sourceTitle = (art?.source_ids || []).map(id => sourceMap.get(id)).filter(Boolean).join(', ');
-              const artTitle = art?.title || sourceTitle || 'Audio';
-              const sId = art?.source_ids?.[0] || null;
-              const status = art?.status || 'completed';
+              if (!art) throw new Error(`El artefacto ${artId} no existe en este cuaderno.`);
+              const sourceTitle = (art.source_ids || []).map(id => sourceMap.get(id)).filter(Boolean).join(', ');
+              const artTitle = art.title || sourceTitle || 'Audio';
+              const sId = art.source_ids?.[0] || null;
+              const status = art.status || 'completed';
 
               const block = store.importRemoteBlock(book.id, {
                 title: artTitle,
@@ -381,6 +382,74 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
             items
           });
         }
+        if (parts[3] === 'downloads' && req.method === 'POST') {
+          const payload = await body(req);
+          const rawItems = Array.isArray(payload.items) ? payload.items : [];
+          if (!rawItems.length) throw new Error('Selecciona al menos un elemento para descargar.');
+
+          const catalog = store.remoteItems(book.id);
+          const catMap = new Map();
+          for (const item of catalog) {
+            catMap.set(item.id, item);
+            catMap.set(item.remote_id, item);
+          }
+
+          const accepted = [];
+          const existing = [];
+          const rejected = [];
+
+          const dir = join(exportsDir, exportDirName(book));
+          await mkdir(dir, { recursive: true });
+          await mkdir(join(dataDir, 'audio'), { recursive: true });
+
+          for (const raw of rawItems) {
+            const itemId = typeof raw === 'string' ? raw : (raw.itemId || raw.id);
+            const format = (typeof raw === 'object' && raw.format) ? raw.format : 'mp3';
+            const catItem = catMap.get(itemId);
+
+            if (!catItem) {
+              rejected.push({ id: itemId, reason: 'Elemento no encontrado en el catálogo.' });
+              continue;
+            }
+            if (catItem.status === 'failed') {
+              rejected.push({ id: itemId, reason: 'El elemento falló en NotebookLM; no se puede descargar.' });
+              continue;
+            }
+            if (catItem.status !== 'completed' && catItem.status !== 'ready') {
+              rejected.push({ id: itemId, reason: 'El elemento aún no está listo en NotebookLM.' });
+              continue;
+            }
+
+            let block = store.get('SELECT * FROM blocks WHERE book_id=? AND artifact_id=?', book.id, catItem.remote_id);
+            if (block && block.state === 'done') {
+              existing.push({ id: itemId, blockId: block.id, state: 'done', path: block.output_path });
+              continue;
+            }
+
+            if (!block) {
+              block = store.importRemoteBlock(book.id, {
+                title: catItem.title,
+                artifactId: catItem.remote_id,
+                sourceId: catItem.source_ids_json ? JSON.parse(catItem.source_ids_json)?.[0] : null,
+                profile: book.profile,
+                status: 'completed',
+                originalPath: join(dataDir, 'audio', `pending.m4a`),
+                outputPath: null
+              });
+              store.update('blocks', block.id, {
+                original_path: join(dataDir, 'audio', `${block.id}.m4a`)
+              });
+              accepted.push({ id: itemId, blockId: block.id, state: 'queued' });
+            } else {
+              if (block.state === 'error') {
+                store.update('blocks', block.id, { stage: 'download', state: 'download', attempts: 0, next_at: 0, error: null, error_code: null });
+              }
+              accepted.push({ id: itemId, blockId: block.id, state: block.state });
+            }
+          }
+          store.updateBlockOutputPaths(book.id, exportsDir, { renameFiles: false });
+          return send(res, 200, { ok: true, accepted, existing, rejected });
+        }
         if (parts[3] === 'open-folder' && req.method === 'POST') {
           const dir = resolve(join(exportsDir, exportDirName(book)));
           await mkdir(dir, { recursive: true });
@@ -409,6 +478,27 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
           errorCode: op.error_code,
           summary
         });
+      }
+      if (req.method === 'GET' && url.pathname === '/api/downloads') {
+        const bookId = url.searchParams.get('bookId');
+        let sql = "SELECT * FROM blocks WHERE stage IN ('download', 'convert') OR state='done'";
+        const params = [];
+        if (bookId) {
+          sql += ' AND book_id=?';
+          params.push(bookId);
+        }
+        sql += ' ORDER BY created_at DESC';
+        const rows = store.all(sql, ...params);
+        return send(res, 200, rows.map(b => ({
+          id: b.id,
+          bookId: b.book_id,
+          artifactId: b.artifact_id,
+          title: b.title,
+          stage: b.stage,
+          state: b.state,
+          error: b.error,
+          outputPath: b.output_path
+        })));
       }
       if (req.method === 'POST' && url.pathname === '/api/exports/open') {
         const dir = resolve(exportsDir);

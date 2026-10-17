@@ -360,13 +360,14 @@ export class Store {
       const hash = `remote-${input.artifactId}`;
       const isReady = input.status === 'completed' || input.status === 'ready' || input.status === 2;
       const isFailed = input.status === 'failed' || input.status === 'error';
-      const stage = isReady ? 'download' : isFailed ? 'generate' : 'poll';
+      const stage = isReady ? 'download' : isFailed ? 'download' : 'poll';
       const state = isReady ? 'download' : isFailed ? 'error' : input.status === 'queued' ? 'queued' : 'generating';
       const error = isFailed ? (input.error || 'Audio fallido en NotebookLM.') : null;
+      const attempts = isFailed ? 4 : 0;
 
-      this.db.prepare(`INSERT INTO blocks(id,book_id,request_id,position,title,filename,file_path,hash,source_title,source_id,artifact_id,generation_profile,stage,state,locked,error,error_code,original_path,output_path,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(id, bookId, `art-${input.artifactId.slice(0, 80)}`, position, name, filename, filePath, hash, name, input.sourceId || null, input.artifactId, input.profile, stage, state, 1, error, isFailed ? 'ARTIFACT_FAILED' : null, input.originalPath || null, input.outputPath || null, Date.now());
+      this.db.prepare(`INSERT INTO blocks(id,book_id,request_id,position,title,filename,file_path,hash,source_title,source_id,artifact_id,generation_profile,stage,state,locked,error,error_code,attempts,original_path,output_path,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(id, bookId, `art-${input.artifactId.slice(0, 80)}`, position, name, filename, filePath, hash, name, input.sourceId || null, input.artifactId, input.profile, stage, state, 1, error, isFailed ? 'ARTIFACT_FAILED' : null, attempts, input.originalPath || null, input.outputPath || null, Date.now());
       return this.block(id);
     });
   }
