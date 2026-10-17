@@ -16,8 +16,9 @@ foreach($entry in @(@('BloqueAudio', (Join-Path $projectDir 'BloqueAudioDev.exe'
     [ShellRefresh]::SHChangeNotify(2,5,(Join-Path $programs ($entry[0]+'.lnk')),$null)
 }
 [ShellRefresh]::SHChangeNotify(0x08000000,0,$null,$null)
-$installed=Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object DisplayName -eq 'BloqueAudio' | Select-Object -First 1
-if($installed.InstallLocation){$installedExe=Join-Path $installed.InstallLocation 'BloqueAudio.exe';if(Test-Path -LiteralPath $installedExe){$env:BLOQUEAUDIO_INSTALLED_EXE=$installedExe}}
+$installed=Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object DisplayName -match '^BloqueAudio(?:\s|$)' | Select-Object -First 1
+$installedExe=if($installed.InstallLocation){Join-Path $installed.InstallLocation 'BloqueAudio.exe'}elseif($installed.DisplayIcon){($installed.DisplayIcon -replace ',\d+$','').Trim('"')}else{$null}
+if($installedExe -and (Test-Path -LiteralPath $installedExe)){$env:BLOQUEAUDIO_INSTALLED_EXE=$installedExe}
 & (Join-Path $projectDir 'node_modules\electron\dist\electron.exe') (Join-Path $PSScriptRoot 'register-menu.cjs')
 if($LASTEXITCODE -ne 0){throw 'Fallo el registro nativo de accesos de Windows.'}
 Write-Host "Accesos actualizados en $programs"
