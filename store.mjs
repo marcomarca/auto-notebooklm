@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { mkdirSync, existsSync, renameSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -120,6 +120,118 @@ export class Store {
       });
       version = 4;
     }
+
+    if (version < 5) {
+      this.transaction(() => {
+        const bookCols = this.all('PRAGMA table_info(books)').map(c => c.name);
+        if (!bookCols.includes('origin')) {
+          this.db.exec("ALTER TABLE books ADD COLUMN origin TEXT NOT NULL DEFAULT 'local_created'");
+        }
+        if (!bookCols.includes('profile_email_at_link')) {
+          this.db.exec('ALTER TABLE books ADD COLUMN profile_email_at_link TEXT');
+        }
+        if (!bookCols.includes('remote_role')) {
+          this.db.exec('ALTER TABLE books ADD COLUMN remote_role TEXT');
+        }
+        if (!bookCols.includes('last_synced_at')) {
+          this.db.exec('ALTER TABLE books ADD COLUMN last_synced_at INTEGER');
+        }
+        if (!bookCols.includes('last_sync_full')) {
+          this.db.exec('ALTER TABLE books ADD COLUMN last_sync_full INTEGER NOT NULL DEFAULT 0');
+        }
+        if (!bookCols.includes('sync_error')) {
+          this.db.exec('ALTER TABLE books ADD COLUMN sync_error TEXT');
+        }
+        if (!bookCols.includes('sync_error_code')) {
+          this.db.exec('ALTER TABLE books ADD COLUMN sync_error_code TEXT');
+        }
+
+        const blockCols = this.all('PRAGMA table_info(blocks)').map(c => c.name);
+        if (!blockCols.includes('cancel_requested_at')) {
+          this.db.exec('ALTER TABLE blocks ADD COLUMN cancel_requested_at INTEGER');
+        }
+        if (!blockCols.includes('canceled_at')) {
+          this.db.exec('ALTER TABLE blocks ADD COLUMN canceled_at INTEGER');
+        }
+        if (!blockCols.includes('cancel_reason')) {
+          this.db.exec('ALTER TABLE blocks ADD COLUMN cancel_reason TEXT');
+        }
+        if (!blockCols.includes('download_policy')) {
+          this.db.exec("ALTER TABLE blocks ADD COLUMN download_policy TEXT NOT NULL DEFAULT 'auto'");
+        }
+
+        const dupes = this.all('SELECT profile, remote_id, COUNT(*) as c FROM books WHERE remote_id IS NOT NULL GROUP BY profile, remote_id HAVING c > 1');
+        if (dupes.length === 0) {
+          this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS books_profile_remote ON books(profile, remote_id) WHERE remote_id IS NOT NULL;');
+        }
+
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS remote_items (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            remote_id TEXT NOT NULL,
+            type TEXT,
+            original_type TEXT,
+            title TEXT NOT NULL,
+            status TEXT,
+            original_status TEXT,
+            source_ids_json TEXT,
+            created_time INTEGER,
+            modified_time INTEGER,
+            error_reason TEXT,
+            last_seen_at INTEGER NOT NULL,
+            sync_rev INTEGER NOT NULL DEFAULT 0,
+            not_visible INTEGER NOT NULL DEFAULT 0,
+            block_id TEXT REFERENCES blocks(id),
+            metadata_json TEXT,
+            UNIQUE(book_id, kind, remote_id)
+          );
+          CREATE INDEX IF NOT EXISTS idx_remote_items_book ON remote_items(book_id, kind);
+
+          CREATE TABLE IF NOT EXISTS download_jobs (
+            id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL UNIQUE,
+            book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+            remote_item_id TEXT NOT NULL REFERENCES remote_items(id) ON DELETE CASCADE,
+            format TEXT NOT NULL DEFAULT 'original',
+            profile TEXT NOT NULL,
+            expected_email TEXT,
+            state TEXT NOT NULL DEFAULT 'queued',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_at INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            error_code TEXT,
+            temp_path TEXT,
+            original_path TEXT,
+            output_path TEXT,
+            created_at INTEGER NOT NULL,
+            completed_at INTEGER
+          );
+          CREATE INDEX IF NOT EXISTS idx_download_jobs_state ON download_jobs(state);
+          CREATE INDEX IF NOT EXISTS idx_download_jobs_item ON download_jobs(remote_item_id, format);
+
+          CREATE TABLE IF NOT EXISTS remote_operations (
+            id TEXT PRIMARY KEY,
+            request_id TEXT UNIQUE,
+            book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+            profile TEXT NOT NULL,
+            type TEXT NOT NULL,
+            target_id TEXT,
+            state TEXT NOT NULL DEFAULT 'pending',
+            created_at INTEGER NOT NULL,
+            started_at INTEGER,
+            completed_at INTEGER,
+            error TEXT,
+            error_code TEXT,
+            summary_json TEXT
+          );
+          CREATE INDEX IF NOT EXISTS idx_remote_operations_book ON remote_operations(book_id, type);
+        `);
+        this.db.exec('PRAGMA user_version = 5;');
+      });
+      version = 5;
+    }
   }
   all(sql, ...args) { return this.db.prepare(sql).all(...args); }
   get(sql, ...args) { return this.db.prepare(sql).get(...args); }
@@ -221,15 +333,17 @@ export class Store {
       .run(id, requestId, name, `${name} [${id.slice(0, 8)}]`, profile, numbering, Date.now());
     return this.book(id);
   }
-  importRemoteBook({ remoteId, title: bookTitle, profile, numbering = 1 }) {
+  importRemoteBook({ remoteId, title: bookTitle, profile, numbering = 1, email = null, role = null }) {
     const name = title(bookTitle || 'Cuaderno remoto');
-    let existing = this.get('SELECT * FROM books WHERE remote_id=?', remoteId);
+    let existing = this.get('SELECT * FROM books WHERE profile=? AND remote_id=?', profile, remoteId);
     if (!existing) {
       const id = randomUUID();
-      const requestId = `remote-${remoteId.slice(0, 80)}`;
+      const hashKey = createHash('sha256').update(`${profile}:${remoteId}`).digest('hex');
+      const requestId = `remote-${hashKey.slice(0, 32)}`;
       const num = (numbering !== false && numbering !== 0) ? 1 : 0;
-      this.db.prepare('INSERT INTO books(id,request_id,title,remote_title,remote_id,profile,numbering,state,created_at) VALUES(?,?,?,?,?,?,?,?,?)')
-        .run(id, requestId, name, name, remoteId, profile, num, 'ready', Date.now());
+      this.db.prepare(`INSERT INTO books(id,request_id,title,remote_title,remote_id,profile,origin,numbering,state,profile_email_at_link,remote_role,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(id, requestId, name, name, remoteId, profile, 'remote_linked', num, 'ready', email, role, Date.now());
       existing = this.book(id);
     }
     return existing;
@@ -281,7 +395,11 @@ export class Store {
   snapshot() {
     return this.books().map(book => ({
       id: book.id, title: book.title, remoteId: book.remote_id, remoteTitle: book.remote_title,
-      profile: book.profile, backups: this.all('SELECT profile FROM book_accounts WHERE book_id=? ORDER BY profile', book.id).map(a => a.profile),
+      profile: book.profile, origin: book.origin || 'local_created',
+      remoteRole: book.remote_role || null,
+      lastSyncedAt: book.last_synced_at || null,
+      syncError: book.sync_error || null,
+      backups: this.all('SELECT profile FROM book_accounts WHERE book_id=? ORDER BY profile', book.id).map(a => a.profile),
       url: book.remote_id ? `https://notebooklm.google.com/notebook/${encodeURIComponent(book.remote_id)}` : null,
       numbering: book.numbering !== 0 && book.numbering !== false,
       state: book.state, running: !!book.running, error: book.error, errorCode: book.error_code,
@@ -290,6 +408,9 @@ export class Store {
         id: b.id, number: b.position, title: b.title, filename: b.filename, sourceId: b.source_id,
         artifactId: b.artifact_id, state: b.state, stage: b.stage, locked: !!b.locked,
         generationProfile: b.generation_profile,
+        cancelRequestedAt: b.cancel_requested_at || null,
+        canceledAt: b.canceled_at || null,
+        downloadPolicy: b.download_policy || 'auto',
         error: b.error, errorCode: b.error_code, nextAt: b.next_at || null,
         audioUrl: b.state === 'done' ? `/api/blocks/${b.id}/audio` : null,
         outputName: b.output_path ? b.output_path.split(/[\\/]/).at(-1) : null

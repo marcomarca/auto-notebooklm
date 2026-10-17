@@ -20,7 +20,7 @@ export function classify(message) {
 }
 
 export class CommandRunner {
-  constructor() { this.children = new Set(); this.terminating = new WeakSet(); }
+  constructor() { this.children = new Set(); this.terminating = new WeakSet(); this.closed = false; }
   terminate(child) {
     if (this.terminating.has(child) || child.exitCode !== null || child.signalCode !== null) return;
     this.terminating.add(child);
@@ -111,7 +111,7 @@ export class Provider {
   forProfile(profile) {
     return new Provider({
       profile,
-      runner: this.runner,
+      runner: new CommandRunner(),
       nlmBinary: this.nlmBinary,
       nlm: this.nlmBinary,
       nlmPrefixArgs: this.nlmPrefixArgs,

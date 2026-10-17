@@ -218,7 +218,7 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
               p.sources(remoteId).catch(() => [])
             ]);
             const sourceMap = new Map(sources.map(s => [s.id || s.source_id, s.title]));
-            const localBook = store.get('SELECT * FROM books WHERE remote_id=?', remoteId);
+            const localBook = store.get('SELECT * FROM books WHERE profile=? AND remote_id=?', profile, remoteId);
             const localBlocks = localBook ? store.blocks(localBook.id) : [];
             const blockMap = new Map(localBlocks.map(b => [b.artifact_id, b]));
 

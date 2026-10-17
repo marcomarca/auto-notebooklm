@@ -3,7 +3,7 @@ const labels = { pending:'Pendiente', creating:'Creando libro', ready:'Fuente li
 let token, books = [], selected = localStorage.getItem('selected-book'), uploading = false, lastRender = '', refreshing = false;
 let createRequest = crypto.randomUUID();
 let accountData = { accounts: [] }, accountStamp = '', backupStamp = '', savingBackups = false;
-let viewingExplorer = false, remoteBooks = [], selectedRemoteId = null, remoteDetail = null, selectedArtifacts = new Set(), explorerProfile = null;
+let viewingExplorer = false, remoteBooks = [], selectedRemoteId = null, remoteDetail = null, selectedArtifacts = new Set(), explorerProfile = null, explorerSeq = 0;
 const date = t => new Intl.DateTimeFormat('es-BO', { dateStyle:'medium', timeStyle:'short', timeZone:'America/La_Paz' }).format(t);
 
 function el(tag, attrs = {}, text) {
@@ -42,7 +42,8 @@ async function refresh() {
     showHealth(health); books = current;
     if (!viewingExplorer && !books.some(b=>b.id === selected)) selected = books[0]?.id;
     if (viewingExplorer && selectedRemoteId && remoteDetail) {
-      const localBook = books.find(b => b.remoteId === selectedRemoteId || b.id === remoteDetail.localBookId);
+      const targetProfile = remoteDetail.profile || explorerProfile;
+      const localBook = books.find(b => (b.remoteId === selectedRemoteId && b.profile === targetProfile) || (remoteDetail.localBookId && b.id === remoteDetail.localBookId));
       if (localBook) {
         remoteDetail.localBookId = localBook.id;
         const blockByArtifact = new Map((localBook.blocks || []).filter(b => b.artifactId).map(b => [b.artifactId, b]));
@@ -139,12 +140,21 @@ function closeExplorer() {
 async function loadRemoteBooks() {
   const profile = $('explorer-profile')?.value || explorerProfile || accountData.current || 'default';
   explorerProfile = profile;
-  notice('Cargando lista de cuadernos desde NotebookLM…');
+  const seq = ++explorerSeq;
+  selectedRemoteId = null;
+  remoteDetail = null;
+  selectedArtifacts.clear();
+  $('remote-detail-empty').hidden = false;
+  $('remote-detail').hidden = true;
+  notice(`Cargando lista de cuadernos desde NotebookLM (${profile})…`);
   try {
-    remoteBooks = await api(`/api/remote/notebooks?profile=${encodeURIComponent(profile)}`);
-    notice(`Se encontraron ${remoteBooks.length} cuadernos en la cuenta.`);
+    const list = await api(`/api/remote/notebooks?profile=${encodeURIComponent(profile)}`);
+    if (seq !== explorerSeq || explorerProfile !== profile) return;
+    remoteBooks = list;
+    notice(`Se encontraron ${remoteBooks.length} cuadernos en la cuenta ${profile}.`);
     renderRemoteBooks();
   } catch(e) {
+    if (seq !== explorerSeq || explorerProfile !== profile) return;
     notice(`Error al listar cuadernos: ${e.message}`, true);
   }
 }
@@ -154,11 +164,13 @@ function renderRemoteBooks() {
     list.replaceChildren(el('div', { class: 'remote-empty-state' }, 'No hay cuadernos disponibles en esta cuenta.'));
     return;
   }
+  const curProfile = explorerProfile || 'default';
   list.replaceChildren(...remoteBooks.map(b => {
     const item = el('button', {
       class: `remote-book-item${b.id === selectedRemoteId ? ' active' : ''}`,
       onclick: () => selectRemoteBook(b.id)
     }, b.title);
+    item.append(el('small', { class: 'account-tag' }, `Cuenta: ${curProfile}`));
     if (b.modifiedAt || b.createdAt) {
       item.append(el('small', {}, `Modificado: ${date(Date.parse(b.modifiedAt || b.createdAt))}`));
     }
@@ -169,18 +181,23 @@ async function selectRemoteBook(id) {
   selectedRemoteId = id;
   renderRemoteBooks();
   const profile = $('explorer-profile')?.value || explorerProfile || accountData.current || 'default';
-  notice('Consultando audios del cuaderno seleccionado…');
+  const seq = ++explorerSeq;
+  selectedArtifacts.clear();
+  notice(`Consultando audios del cuaderno seleccionado (${profile})…`);
   try {
-    remoteDetail = await api(`/api/remote/notebooks/${encodeURIComponent(id)}?profile=${encodeURIComponent(profile)}`);
+    const detail = await api(`/api/remote/notebooks/${encodeURIComponent(id)}?profile=${encodeURIComponent(profile)}`);
+    if (seq !== explorerSeq || explorerProfile !== profile || selectedRemoteId !== id) return;
+    remoteDetail = detail;
     const bookTitle = remoteDetail.title || remoteBooks.find(b => b.id === id)?.title || 'Cuaderno';
-    $('remote-book-title').textContent = bookTitle;
+    $('remote-book-title').textContent = `${bookTitle} (${profile})`;
     $('remote-book-link').href = `https://notebooklm.google.com/notebook/${encodeURIComponent(id)}`;
-    selectedArtifacts = new Set(remoteDetail.artifacts.map(a => a.id));
+    selectedArtifacts = new Set((remoteDetail.artifacts || []).map(a => a.id));
     $('remote-detail-empty').hidden = true;
     $('remote-detail').hidden = false;
     renderRemoteDetail();
     notice('');
   } catch (e) {
+    if (seq !== explorerSeq || explorerProfile !== profile) return;
     notice(`Error al consultar cuaderno: ${e.message}`, true);
   }
 }
@@ -342,7 +359,7 @@ function render() {
   lastRender = stamp;
   $('library').replaceChildren(...books.map(b => {
     const button = el('button',{class:`book-button${!viewingExplorer && b.id === selected ? ' active' : ''}`,onclick:()=>{ viewingExplorer=false; choose(b.id); }},b.title);
-    button.append(el('small',{},`${b.blocks.filter(x=>x.state === 'done').length} de ${b.blocks.length} audios listos`));
+    button.append(el('small',{},`Cuenta: ${b.profile} · ${b.blocks.filter(x=>x.state === 'done').length} de ${b.blocks.length} audios listos`));
     return button;
   }));
 
@@ -474,7 +491,18 @@ $('book-numbering').addEventListener('change', e => {
 $('open-explorer').addEventListener('click', openExplorer);
 $('close-explorer').addEventListener('click', closeExplorer);
 $('explorer-reload').addEventListener('click', () => act(loadRemoteBooks));
-$('explorer-profile').addEventListener('change', e => { explorerProfile = e.target.value; act(loadRemoteBooks); });
+$('explorer-profile').addEventListener('change', e => {
+  explorerProfile = e.target.value;
+  explorerSeq++;
+  selectedRemoteId = null;
+  remoteDetail = null;
+  selectedArtifacts.clear();
+  remoteBooks = [];
+  renderRemoteBooks();
+  $('remote-detail-empty').hidden = false;
+  $('remote-detail').hidden = true;
+  act(loadRemoteBooks);
+});
 $('remote-select-all').addEventListener('change', e => {
   const artifacts = remoteDetail?.artifacts || [];
   if (e.target.checked) {
