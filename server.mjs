@@ -11,6 +11,7 @@ import { Store, title, safeName, exportDirName } from './store.mjs';
 import { Provider, redact } from './provider.mjs';
 import { Queue } from './queue.mjs';
 import { Accounts, profileId } from './accounts.mjs';
+import { version as appVersion, mode, dataDir as defaultDataDir, exportsDir as defaultExportsDir } from './runtime.mjs';
 
 export function openInExplorer(targetPath) {
   const dir = resolve(targetPath);
@@ -74,7 +75,7 @@ function requestId(value) {
   return value;
 }
 
-export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(root, 'exports'), provider = new Provider({ profile: process.env.NLM_PROFILE || 'default' }), accountFactory, port = Number(process.env.PORT || 4318), worker = true, check = true, allowHttpShutdown = true } = {}) {
+export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultExportsDir, provider = new Provider({ profile: process.env.NLM_PROFILE || 'default' }), accountFactory, port = Number(process.env.PORT || 4318), worker = true, check = true, allowHttpShutdown = true } = {}) {
   await mkdir(dataDir, { recursive: true });
   const releaseLock = await acquireLock(dataDir);
   let store;
@@ -83,6 +84,7 @@ export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(
   const queue = new Queue(store, provider, { dataDir, exportsDir, accounts });
   const token = randomBytes(32).toString('hex');
   let origin, closed = false, shutdown, initialization;
+  const completion = Promise.withResolvers();
   const resumeAuth = id => {
     for (const b of store.books()) {
       if (b.profile === id && b.state === 'auth') queue.retryBook(b.id);
@@ -170,7 +172,7 @@ export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(
         });
         return;
       }
-      if (req.method === 'GET' && url.pathname === '/api/health') return send(res, 200, { ...accounts.get(accounts.current).health, token, busy: queue.busy });
+      if (req.method === 'GET' && url.pathname === '/api/health') return send(res, 200, { ...accounts.get(accounts.current).health, app: 'BloqueAudio', appVersion, mode, token, busy: queue.busy });
       if (req.method === 'POST' && url.pathname === '/api/health/check') {
         const h = await healthCheck();
         return send(res, 200, h);
@@ -390,7 +392,7 @@ export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(
         }
       }
       if (req.method === 'GET') {
-        const assets = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'] };
+        const assets = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/icon.svg': ['icon.svg', 'image/svg+xml'], '/favicon.ico': ['icon.ico', 'image/x-icon'] };
         const asset = assets[url.pathname];
         if (asset) {
           const content = await readFile(join(publicDir, asset[0]));
@@ -415,13 +417,18 @@ export async function makeApp({ dataDir = join(root, 'data'), exportsDir = join(
       const closing = new Promise(resolve => server.close(resolve));
       server.closeAllConnections(); await queue.stop(); await initialization; await closing; store.close();
       await releaseLock();
+      completion.resolve();
   };
-  return { server, store, queue, provider, accounts, origin, token, close: shutdown };
+  return { server, store, queue, provider, accounts, origin, token, close: shutdown, finished: completion.promise };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const app = await makeApp();
-  console.log(`Audios por bloques: ${app.origin}\nPerfil: ${app.provider.profile}\nCtrl+C para cerrar.`);
+  app.finished.then(() => process.exit(0));
+  console.log(`BloqueAudio ${appVersion}: ${app.origin}`);
+  process.send?.({ type: 'ready', origin: app.origin });
   const shutdown = async () => { await app.close(); process.exit(0); };
   process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
+  process.on('message', m => { if (m?.type === 'shutdown') shutdown(); });
+  process.once('disconnect', shutdown);
 }

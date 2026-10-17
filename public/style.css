@@ -116,3 +116,14 @@ summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
 
 
 
+:root { --blue: #6344a8; --line: #e1ddea; }
+.brand-mark { flex-shrink: 0; }
+.brand { color: #392b59; }
+.brand small { color: #685b7c; }
+.book-button.active { background: #f0ebfa; border-left-color: #6344a8; }
+button.quiet, .link-button.quiet { background: #eee8f7; color: #593990; }
+#drop-zone { background: #f3effa; border-color: #b5a4d0; color: #6b5a84; }
+#drop-zone strong { color: #493368; }
+#drop-zone.dragging { background: #e3f7f1; border-color: #408672; }
+#app-version { color: #6344a8; font-weight: 600; }
+

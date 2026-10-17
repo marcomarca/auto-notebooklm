@@ -130,3 +130,15 @@ npm run test:live
 `test:live` crea un cuaderno de prueba con dos Markdown distintos, genera dos podcasts reales y valida cada MP3 decodificándolo con FFmpeg. **Consume cuota real**. Guarda el informe en `data/live-check/report.json`, conserva los audios y cierra su servidor/procesos al terminar. Es reanudable: una segunda ejecución usa el mismo libro y no vuelve a generar bloques terminados. No elimina automáticamente el cuaderno remoto.
 
 `node scripts/preview-check.mjs` sirve una biblioteca desechable de 25 bloques para verificar la interfaz. No llama a NotebookLM, no sirve audios reales y se cierra automáticamente después de tres minutos.
+
+## BloqueAudio 1.1.1 (carpeta activa D:)
+
+Este proyecto activo está en `D:\apps-2026\auto-notebooklm`. La copia bajo `Documents/ChatGPT` es otra biblioteca y otro repositorio; sus compilaciones no actualizan esta aplicación.
+
+- `npm run dev` o `start-app.bat`: inicia el código actual en el navegador, reinicia el backend al guardar módulos y conserva `data/` y `exports/` de esta carpeta.
+- `npm run dist:win`: recompila el instalador Electron `dist/BloqueAudio-Setup-1.1.1.exe` y la aplicación `dist/win-unpacked/BloqueAudio.exe`.
+- `npm run install:start-menu`: registra BloqueAudio (desarrollo) y BloqueAudio (distribucion) con identificadores propios de Windows. No inicia automáticamente al encender el PC.
+- El escritorio conserva `%APPDATA%/AutoNotebookLM` y `Documents/AutoNotebookLM/exports`; el cambio de marca no mueve ni reemplaza esa biblioteca. El navegador de desarrollo conserva la biblioteca de D:.
+- `node scripts/smoke-desktop.mjs`: prueba el ejecutable real con datos temporales, sin acceder a Google ni iniciar trabajos, y cierra todos sus procesos.
+
+Correcciones: lectura de `runtime.json` con BOM generado por PowerShell; uso directo del runtime incluido para evitar copiar miles de archivos antes de abrir la interfaz; desactivación del actualizador mientras su repositorio siga siendo el ejemplo OWNER; errores de inicio visibles. La versión aparece en la interfaz y en las propiedades del ejecutable.

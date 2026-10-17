@@ -27,6 +27,7 @@ async function api(path, { method = 'GET', data, binary } = {}) {
 async function act(fn) { try { await fn(); await refresh(); } catch(e) { notice(e.message, true); } }
 function showHealth(h) {
   if (h.token) token = h.token;
+  if (h.appVersion) $('app-version').textContent = `BloqueAudio ${h.appVersion} · ${h.mode === 'development' ? 'Desarrollo' : 'Distribución'}`;
   $('health-label').textContent = h.error || (h.ready ? 'NotebookLM conectado' : 'Comprobando conexión…');
   $('profile-label').textContent = `Perfil: ${h.profile || 'default'}${h.version ? ` · ${h.version.replace('nlm version ','')}` : ''}`;
   $('login-hint').hidden = h.auth || !h.cli || h.errorCode !== 'AUTH_REQUIRED';

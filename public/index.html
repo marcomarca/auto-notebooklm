@@ -2,16 +2,16 @@
 <html lang="es">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Audios por bloques</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+  <title>BloqueAudio · Podcasts por capítulos</title><link rel="icon" href="/favicon.ico"><link rel="icon" href="/icon.svg" type="image/svg+xml"><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
 </head>
 <body>
   <aside class="sidebar">
-    <div class="brand"><span class="brand-icon" aria-hidden="true">▥</span><div>Audios por bloques<small>Tu libro, capítulo a capítulo</small></div></div>
+    <div class="brand"><img src="/icon.svg" width="48" height="48" alt=""><div>BloqueAudio<small>Podcasts por capítulos</small></div></div>
     <form id="create-form"><label for="book-title">Nuevo libro</label><input id="book-title" name="title" maxlength="180" placeholder="Nombre del libro" required><button id="create-button" type="submit">Crear libro</button></form>
     <button id="open-explorer" class="quiet explore-button" type="button"><span aria-hidden="true">☁</span> Explorar cuadernos de mi cuenta</button>
     <nav id="library" aria-label="Libros"></nav>
     <details id="account-panel"><summary>Cuentas y cuota</summary><div id="accounts"></div><form id="account-form"><label for="new-profile">Añadir cuenta</label><input id="new-profile" pattern="[A-Za-z0-9_-]{1,80}" maxlength="80" placeholder="Ej.: cuenta3" required><button id="add-account">Añadir e iniciar sesión</button></form><p class="muted">Los perfiles se comparten con NotebooklmPRO. Habilitar una cuenta permite usarla en la cola.</p></details>
-    <div class="connection"><span id="health-label">Comprobando conexión…</span><small id="profile-label"></small><button id="check-connection" class="quiet">Comprobar conexión</button><code id="login-hint" hidden></code></div>
+    <div class="connection"><small id="app-version"></small><span id="health-label">Comprobando conexión…</span><small id="profile-label"></small><button id="check-connection" class="quiet">Comprobar conexión</button><code id="login-hint" hidden></code></div>
   </aside>
   <main>
     <div id="desktop-update-banner" class="update-banner" hidden>

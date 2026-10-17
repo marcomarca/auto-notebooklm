@@ -37,3 +37,12 @@ test('ComponentManager: state management, rollback y limpieza de versiones', asy
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('runtime.json con BOM de PowerShell se interpreta y valida sus rutas', () => {
+  const dir=mkdtempSync(join(tmpdir(),'nlm-bom-'));
+  try {
+    writeFileSync(join(dir,'runtime.json'),'\uFEFF'+JSON.stringify({python:'missing-python.exe'}));
+    const result=new ComponentManager(dir,{}).verifyRuntimeDir(dir);
+    assert.equal(result.ok,false);assert.equal(result.error,'python.exe no existe');
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});

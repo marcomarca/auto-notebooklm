@@ -57,7 +57,7 @@ export class ComponentManager {
 
     let meta;
     try {
-      meta = JSON.parse(readFileSync(metaFile, 'utf8'));
+      meta = JSON.parse(readFileSync(metaFile, 'utf8').replace(/^\uFEFF/, ''));
     } catch (e) {
       return { ok: false, error: `runtime.json inválido: ${e.message}` };
     }
@@ -104,10 +104,10 @@ export class ComponentManager {
 
   async resolveRuntime() {
     const isPackaged = app?.isPackaged ?? false;
-    const resourcesPath = isPackaged ? process.resourcesPath : process.cwd();
+    const resourcesPath = isPackaged ? process.resourcesPath : join(app.getAppPath?.() || process.cwd(), 'build');
 
     // Inicializar bootstrap si es necesario
-    this.initBootstrap(resourcesPath);
+    // Use the bundled read-only runtime on first launch; copying thousands of files blocks the UI.
 
     const state = this.getState();
 
@@ -166,6 +166,14 @@ export class ComponentManager {
       }
     }
 
+    const bundled = this.verifyRuntimeDir(join(resourcesPath, 'runtime-bootstrap'));
+    if (bundled.ok) return {
+      python: bundled.pythonPath, nlmBinary: bundled.pythonPath,
+      nlmPrefixArgs: [bundled.nlmEntryPath], bridgeScript: bundled.bridgeScriptPath,
+      ffmpeg: this._resolveFfmpeg(resourcesPath), connectorVersion: bundled.meta.connectorVersion,
+      upstreamNlmVersion: bundled.meta.upstreamNlmVersion,
+    };
+    if (isPackaged) throw new Error(`El runtime incluido no supera la validación: ${bundled.error}. Reinstala BloqueAudio.`);
     // 3. Fallback a desarrollo
     return {
       python: process.env.PYTHON_BINARY || (process.platform === 'win32' ? (process.env.APPDATA ? `${process.env.APPDATA}\\uv\\tools\\notebooklm-mcp-cli\\Scripts\\python.exe` : 'python') : 'python3'),

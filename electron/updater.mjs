@@ -1,5 +1,7 @@
 import electron from 'electron';
 import electronUpdater from 'electron-updater';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const app = electron?.app || electron;
 
@@ -35,6 +37,11 @@ export class AppUpdater {
       this.logger?.info('AppUpdater omitido en modo desarrollo.');
       return;
     }
+    const feed = join(process.resourcesPath, 'app-update.yml');
+    if (!existsSync(feed) || /owner:\s*OWNER\b/.test(readFileSync(feed, 'utf8'))) {
+      this.setState({ status: 'not-configured' }); return;
+    }
+    this.enabled = true;
 
     const autoUpdater = getAutoUpdater();
     autoUpdater.autoDownload = true;
@@ -84,6 +91,7 @@ export class AppUpdater {
   }
 
   async checkForUpdates() {
+    if (!this.enabled) return { status: 'not-configured' };
     if (!app?.isPackaged) return { status: 'dev-mode' };
     try {
       const autoUpdater = getAutoUpdater();

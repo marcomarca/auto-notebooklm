@@ -6,3 +6,5 @@ dist/
 vendor/
 build/runtime-bootstrap/
 runtime/
+
+/BloqueAudioDev.exe

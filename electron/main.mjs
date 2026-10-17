@@ -1,7 +1,7 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, dialog } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 
 import { getPaths, ensurePaths } from './paths.mjs';
 import { Logger } from './logger.mjs';
@@ -15,6 +15,10 @@ import { Provider } from '../provider.mjs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const rootDir = dirname(__dirname);
+const smokeDir = process.env.BLOQUEAUDIO_SMOKE_DIR;
+// Keep the existing library when changing the visible product name.
+app.setPath('userData', smokeDir || join(app.getPath('appData'), 'AutoNotebookLM'));
+app.setAppUserModelId('com.autonotebooklm.desktop');
 
 // 1. Single Instance Lock
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -83,13 +87,15 @@ ipcMain.handle('desktop:install-update', () => updater?.installUpdate());
 
 app.whenReady().then(async () => {
   // 3. Resolver y asegurar directorios persistentes
-  const paths = ensurePaths(getPaths(app));
+  const selectedPaths = getPaths(app);
+  if (smokeDir) { selectedPaths.exportsDir = join(smokeDir, 'exports'); selectedPaths.runtimeDir = join(smokeDir, 'runtime'); }
+  const paths = ensurePaths(selectedPaths);
   logger = new Logger(paths.logsDir);
 
   // Comprobar e importar datos legacy si es la primera ejecución
-  promptLegacyMigration(paths, logger);
+  if (!smokeDir) promptLegacyMigration(paths, logger);
 
-  logger.info('Iniciando AutoNotebookLM Desktop', {
+  logger.info('Iniciando BloqueAudio Desktop', {
     appVersion: app.getVersion(),
     electronVersion: process.versions.electron,
     nodeVersion: process.versions.node,
@@ -128,8 +134,8 @@ app.whenReady().then(async () => {
       exportsDir: paths.exportsDir,
       provider,
       port: 4318,
-      worker: true,
-      check: true,
+      worker: !smokeDir,
+      check: !smokeDir,
       allowHttpShutdown: false,
     });
   } catch (err) {
@@ -140,8 +146,8 @@ app.whenReady().then(async () => {
         exportsDir: paths.exportsDir,
         provider,
         port: 0,
-        worker: true,
-        check: true,
+        worker: !smokeDir,
+        check: !smokeDir,
         allowHttpShutdown: false,
       });
     } else {
@@ -161,7 +167,8 @@ app.whenReady().then(async () => {
     height: 860,
     minWidth: 900,
     minHeight: 600,
-    title: 'AutoNotebookLM',
+    title: `BloqueAudio ${app.getVersion()}`,
+    show: !smokeDir,
     icon: existsSync(iconPath) ? iconPath : undefined,
     webPreferences: {
       preload: preloadPath,
@@ -198,6 +205,12 @@ app.whenReady().then(async () => {
 
   // 8. Cargar backend.origin
   await mainWindow.loadURL(backend.origin);
+  if (smokeDir) {
+    mkdirSync(smokeDir, { recursive: true });
+    const body = await mainWindow.webContents.executeJavaScript('document.body.innerText');
+    writeFileSync(join(smokeDir, 'smoke.json'), JSON.stringify({ version: app.getVersion(), node: process.versions.node, title: mainWindow.getTitle(), branded: body.includes('BloqueAudio'), runtime: runtime.connectorVersion }));
+    app.quit(); return;
+  }
 
   // 9. Iniciar updater
   updater = new AppUpdater({
@@ -211,6 +224,7 @@ app.whenReady().then(async () => {
   });
   updater.init();
 }).catch(async (fatalErr) => {
+  if (!smokeDir) dialog.showErrorBox('BloqueAudio no pudo iniciarse', fatalErr.message);
   if (logger) {
     logger.error('Error fatal al inicializar aplicación:', fatalErr.message);
   } else {

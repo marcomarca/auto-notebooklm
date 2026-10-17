@@ -1,7 +1,7 @@
 {
   "name": "auto-notebooklm",
-  "productName": "AutoNotebookLM",
-  "version": "1.0.0",
+  "productName": "BloqueAudio",
+  "version": "1.1.1",
   "private": true,
   "type": "module",
   "main": "electron/main.mjs",
@@ -10,6 +10,8 @@
   },
   "scripts": {
     "start": "node server.mjs",
+    "dev": "node scripts/launch.mjs --dev",
+    "install:start-menu": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-start-menu.ps1",
     "desktop": "electron .",
     "test": "node --test tests/*.test.mjs",
     "test:live": "node scripts/live-check.mjs",

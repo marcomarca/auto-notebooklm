@@ -30,10 +30,10 @@ export class CommandRunner {
     killer.on('error', () => child.kill());
     killer.on('close', code => { if (code !== 0) child.kill(); });
   }
-  run(binary, args, { timeout = 120000, env = {}, windowsHide = true } = {}) {
+  run(binary, args, { timeout = 120000, env = {}, windowsHide = true, cwd } = {}) {
     if (this.closed) return Promise.reject(new ProviderError('UNAVAILABLE', 'La aplicación está cerrando.'));
     return new Promise((resolve, reject) => {
-      const child = spawn(binary, args, { shell: false, windowsHide, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn(binary, args, { shell: false, windowsHide, cwd, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
       this.children.add(child);
       child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
       let stdout = '', stderr = '', failure;
