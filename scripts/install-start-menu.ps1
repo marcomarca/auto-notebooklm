@@ -19,6 +19,6 @@ foreach($entry in @(@('BloqueAudio', (Join-Path $projectDir 'BloqueAudioDev.exe'
 $installed=Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object DisplayName -match '^BloqueAudio(?:\s|$)' | Select-Object -First 1
 $installedExe=if($installed.InstallLocation){Join-Path $installed.InstallLocation 'BloqueAudio.exe'}elseif($installed.DisplayIcon){($installed.DisplayIcon -replace ',\d+$','').Trim('"')}else{$null}
 if($installedExe -and (Test-Path -LiteralPath $installedExe)){$env:BLOQUEAUDIO_INSTALLED_EXE=$installedExe}
-& (Join-Path $projectDir 'node_modules\electron\dist\electron.exe') (Join-Path $PSScriptRoot 'register-menu.cjs')
-if($LASTEXITCODE -ne 0){throw 'Fallo el registro nativo de accesos de Windows.'}
+$registration=Start-Process -FilePath (Join-Path $projectDir 'node_modules\electron\dist\electron.exe') -ArgumentList ('"'+(Join-Path $PSScriptRoot 'register-menu.cjs')+'"') -WindowStyle Hidden -Wait -PassThru
+if($registration.ExitCode -ne 0){throw 'Fallo el registro nativo de accesos de Windows.'}
 Write-Host "Accesos actualizados en $programs"
