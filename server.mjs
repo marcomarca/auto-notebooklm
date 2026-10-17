@@ -11,6 +11,7 @@ import { Store, title, safeName, exportDirName } from './store.mjs';
 import { Provider, redact } from './provider.mjs';
 import { Queue } from './queue.mjs';
 import { Accounts, profileId } from './accounts.mjs';
+import { syncNotebook } from './sync.mjs';
 import { version as appVersion, mode, dataDir as defaultDataDir, exportsDir as defaultExportsDir } from './runtime.mjs';
 
 export function openInExplorer(targetPath) {
@@ -249,6 +250,18 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
               sources: sources.map(s => ({ id: s.id || s.source_id, title: s.title }))
             });
           }
+          if (parts[4] === 'sync' && req.method === 'POST') {
+            const payload = await body(req);
+            const reqProfile = profileId(payload.profile || profile);
+            const result = await syncNotebook({
+              store,
+              accounts,
+              profile: reqProfile,
+              remoteId,
+              requestId: payload.requestId
+            });
+            return send(res, 202, result);
+          }
           if (parts[4] === 'import' && req.method === 'POST') {
             const payload = await body(req);
             const reqProfile = profileId(payload.profile || profile);
@@ -336,6 +349,38 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
           store.update('books', book.id, { generation_mode: mode });
           return send(res, 200, { ok: true, mode });
         }
+        if (parts[3] === 'sync' && req.method === 'POST') {
+          if (!book.remote_id) return send(res, 400, { error: 'Este libro no está vinculado a un cuaderno remoto.' });
+          const payload = req.headers['content-length'] > 0 ? await body(req).catch(() => ({})) : {};
+          const result = await syncNotebook({
+            store,
+            accounts,
+            profile: book.profile,
+            remoteId: book.remote_id,
+            requestId: payload?.requestId
+          });
+          return send(res, 202, result);
+        }
+        if (parts[3] === 'catalog' && req.method === 'GET') {
+          const kind = url.searchParams.get('kind') || undefined;
+          const type = url.searchParams.get('type') || undefined;
+          const items = store.remoteItems(book.id, { kind, type });
+          return send(res, 200, {
+            book: {
+              id: book.id,
+              title: book.title,
+              remoteId: book.remote_id,
+              profile: book.profile,
+              origin: book.origin,
+              remoteRole: book.remote_role,
+              lastSyncedAt: book.last_synced_at,
+              lastSyncFull: !!book.last_sync_full,
+              syncError: book.sync_error,
+              syncErrorCode: book.sync_error_code
+            },
+            items
+          });
+        }
         if (parts[3] === 'open-folder' && req.method === 'POST') {
           const dir = resolve(join(exportsDir, exportDirName(book)));
           await mkdir(dir, { recursive: true });
@@ -343,6 +388,27 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
           return send(res, 200, { ok: true, path: dir });
         }
         if (parts[3] === 'retry' && req.method === 'POST') { queue.retryBook(book.id); return send(res, 200, { ok: true }); }
+      }
+      if (parts[0] === 'api' && parts[1] === 'operations' && parts[2] && req.method === 'GET') {
+        const op = store.remoteOperation(parts[2]);
+        if (!op) return send(res, 404, { error: 'Operación inexistente.' });
+        let summary = null;
+        try { if (op.summary_json) summary = JSON.parse(op.summary_json); } catch {}
+        return send(res, 200, {
+          id: op.id,
+          requestId: op.request_id,
+          bookId: op.book_id,
+          profile: op.profile,
+          type: op.type,
+          targetId: op.target_id,
+          state: op.state,
+          createdAt: op.created_at,
+          startedAt: op.started_at,
+          completedAt: op.completed_at,
+          error: op.error,
+          errorCode: op.error_code,
+          summary
+        });
       }
       if (req.method === 'POST' && url.pathname === '/api/exports/open') {
         const dir = resolve(exportsDir);

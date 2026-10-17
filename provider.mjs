@@ -202,15 +202,20 @@ export class Provider {
       '--wait', '--wait-timeout', '600', '--json', '-p', this.profile], { timeout: 660000 });
     return remoteId(r.source_id);
   }
-  async artifacts(bookId, artifactId) {
+  async notes(bookId) {
+    return array(await this.cli(['note', 'list', remoteId(bookId), '--json', '-p', this.profile]), 'notes');
+  }
+  async artifacts(bookId, artifactId, { detailed = false } = {}) {
     if (artifactId) {
       const args = ['studio', 'status', remoteId(bookId), '--full', '--json', '--mcp-compatible', '--artifact-id', remoteId(artifactId), '-p', this.profile];
-      return array(await this.cli(args), 'artifacts');
+      const items = array(await this.cli(args), 'artifacts');
+      return detailed ? { items, truncated: false } : items;
     }
     const all = [];
     const seen = new Set();
     let offset = 0;
     const limit = 100;
+    let truncated = false;
     while (true) {
       const args = ['studio', 'status', remoteId(bookId), '--full', '--json', '--mcp-compatible', '--limit', String(limit), '--offset', String(offset), '-p', this.profile];
       const page = array(await this.cli(args), 'artifacts');
@@ -226,10 +231,14 @@ export class Provider {
           newCount++;
         }
       }
-      if (page.length < limit || newCount === 0 || all.length >= 2000) break;
+      if (all.length >= 2000) {
+        if (page.length === limit && newCount > 0) truncated = true;
+        break;
+      }
+      if (page.length < limit || newCount === 0) break;
       offset += limit;
     }
-    return all;
+    return detailed ? { items: all, truncated } : all;
   }
   async generate(bookId, sourceId, { defer = false } = {}) {
     // Never let the CLI's omitted-source default broaden this to the whole notebook.

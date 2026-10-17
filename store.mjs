@@ -417,5 +417,71 @@ export class Store {
       }))
     }));
   }
+  remoteItems(bookId, { kind, type } = {}) {
+    let sql = 'SELECT * FROM remote_items WHERE book_id=?';
+    const params = [bookId];
+    if (kind) { sql += ' AND kind=?'; params.push(kind); }
+    if (type) { sql += ' AND type=?'; params.push(type); }
+    sql += ' ORDER BY created_time DESC, last_seen_at DESC';
+    return this.all(sql, ...params);
+  }
+  remoteItem(id) {
+    return this.get('SELECT * FROM remote_items WHERE id=?', id);
+  }
+  remoteItemByRemoteId(bookId, kind, remoteId) {
+    return this.get('SELECT * FROM remote_items WHERE book_id=? AND kind=? AND remote_id=?', bookId, kind, remoteId);
+  }
+  upsertRemoteItem(item) {
+    const existing = this.remoteItemByRemoteId(item.bookId, item.kind, item.remoteId);
+    if (existing) {
+      this.db.prepare(`
+        UPDATE remote_items SET
+          title=?, type=?, original_type=?, status=?, original_status=?,
+          source_ids_json=?, created_time=?, modified_time=?, error_reason=?,
+          last_seen_at=?, sync_rev=?, not_visible=0, block_id=COALESCE(block_id, ?),
+          metadata_json=?
+        WHERE id=?
+      `).run(
+        item.title, item.type || null, item.originalType || null,
+        item.status || null, item.originalStatus || null,
+        item.sourceIdsJson || null, item.createdTime || null, item.modifiedTime || null,
+        item.errorReason || null, item.lastSeenAt || Date.now(), item.syncRev || 0,
+        item.blockId || null, item.metadataJson || null, existing.id
+      );
+      return this.remoteItem(existing.id);
+    }
+    const id = item.id || randomUUID();
+    this.db.prepare(`
+      INSERT INTO remote_items(
+        id, book_id, kind, remote_id, type, original_type, title, status, original_status,
+        source_ids_json, created_time, modified_time, error_reason, last_seen_at, sync_rev,
+        not_visible, block_id, metadata_json
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).run(
+      id, item.bookId, item.kind, item.remoteId, item.type || null, item.originalType || null,
+      item.title, item.status || null, item.originalStatus || null, item.sourceIdsJson || null,
+      item.createdTime || null, item.modifiedTime || null, item.errorReason || null,
+      item.lastSeenAt || Date.now(), item.syncRev || 0, 0, item.blockId || null, item.metadataJson || null
+    );
+    return this.remoteItem(id);
+  }
+  markAbsentRemoteItems(bookId, kind, currentRev) {
+    return this.db.prepare('UPDATE remote_items SET not_visible=1 WHERE book_id=? AND kind=? AND sync_rev < ?')
+      .run(bookId, kind, currentRev);
+  }
+  createRemoteOperation({ requestId, bookId, profile, type, targetId, state = 'pending' }) {
+    const id = randomUUID();
+    this.db.prepare(`
+      INSERT INTO remote_operations(id, request_id, book_id, profile, type, target_id, state, created_at)
+      VALUES(?,?,?,?,?,?,?,?)
+    `).run(id, requestId || null, bookId, profile, type, targetId || null, state, Date.now());
+    return this.remoteOperation(id);
+  }
+  remoteOperation(id) {
+    return this.get('SELECT * FROM remote_operations WHERE id=?', id);
+  }
+  remoteOperations(bookId) {
+    return this.all('SELECT * FROM remote_operations WHERE book_id=? ORDER BY created_at DESC', bookId);
+  }
   close() { this.db.close(); }
 }

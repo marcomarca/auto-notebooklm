@@ -32,7 +32,7 @@ async function launch(t,binary,args,cwd) {
 test('desarrollo reinicia de forma segura, sirve marca y cierra el proceso completo',async t=>{
   const copy=await mkdtemp(join(tmpdir(),'bloque audio codigo-'));
   t.after(()=>rm(copy,{recursive:true,force:true}));
-  for(const file of ['package.json','runtime.mjs','server.mjs','store.mjs','provider.mjs','queue.mjs','accounts.mjs','public']) await cp(join(root,file),join(copy,file),{recursive:true});
+  for(const file of ['package.json','runtime.mjs','server.mjs','store.mjs','provider.mjs','queue.mjs','accounts.mjs','sync.mjs','public']) await cp(join(root,file),join(copy,file),{recursive:true});
   await cp(join(root,'scripts'),join(copy,'scripts'),{recursive:true});
   const f=await launch(t,process.execPath,[join(copy,'scripts','launch.mjs'),'--dev'],copy);
   let health=await fetch(f.origin+'/api/health').then(r=>r.json());assert.equal(health.mode,'development');assert.equal(health.app,'BloqueAudio');
