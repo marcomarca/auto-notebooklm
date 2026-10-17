@@ -381,6 +381,22 @@ export class Store {
       return this.block(id);
     });
   }
+  addRemoteSourceBlock(bookId, { sourceId, title: blockTitle, generationMode = 'immediate' }) {
+    return this.transaction(() => {
+      const position = this.get('SELECT COALESCE(MAX(position),0)+1 AS n FROM blocks WHERE book_id=?', bookId).n;
+      const id = randomUUID();
+      const name = title(blockTitle || `Audio ${position}`);
+      const filename = `${safeName(name)}.source`;
+      const hash = `remote-source-${sourceId}`;
+      const existing = this.get('SELECT * FROM blocks WHERE book_id=? AND hash=?', bookId, hash);
+      if (existing) return existing;
+      this.db.prepare(`
+        INSERT INTO blocks(id, book_id, request_id, position, title, filename, file_path, hash, source_title, source_id, stage, state, locked, generation_mode, created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(id, bookId, `gen-${randomUUID().slice(0, 20)}`, position, name, filename, '', hash, name, sourceId, 'generate', 'ready', 1, generationMode, Date.now());
+      return this.block(id);
+    });
+  }
   reorder(bookId, ids) {
     const rows = this.blocks(bookId);
     if (!Array.isArray(ids) || ids.length !== rows.length || new Set(ids).size !== rows.length || ids.some(id => !rows.some(b => b.id === id)))

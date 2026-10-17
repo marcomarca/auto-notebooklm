@@ -134,8 +134,22 @@ export class Queue {
         const row = (await provider.sources(book.remote_id)).find(s => (s.id || s.source_id) === block.source_id);
         if (!row) throw new ProviderError('REJECTED', 'La fuente ya no existe en el cuaderno.');
         if (row.status === 3 || row.status === 'failed') throw new ProviderError('REJECTED', 'NotebookLM no pudo procesar esta fuente.');
-        if (readySource(row)) this.store.update('blocks', block.id, { stage: 'generate', state: 'ready', next_at: 0, attempts: 0, error: null, error_code: null });
-        else if (this.now() - block.started_at > 30 * 60 * 1000) throw new ProviderError('REJECTED', 'La fuente lleva más de 30 minutos procesándose. Comprueba NotebookLM y reintenta la consulta.');
+        if (readySource(row)) {
+          this.store.upsertRemoteItem({
+            bookId: book.id,
+            kind: 'source',
+            remoteId: block.source_id,
+            title: row.title || block.source_title,
+            type: 'file',
+            status: 'ready',
+            originalStatus: String(row.status)
+          });
+          if (book.origin === 'remote_linked') {
+            this.store.update('blocks', block.id, { stage: 'source_ready', state: 'ready', next_at: 0, attempts: 0, error: null, error_code: null });
+          } else {
+            this.store.update('blocks', block.id, { stage: 'generate', state: 'ready', next_at: 0, attempts: 0, error: null, error_code: null });
+          }
+        } else if (this.now() - block.started_at > 30 * 60 * 1000) throw new ProviderError('REJECTED', 'La fuente lleva más de 30 minutos procesándose. Comprueba NotebookLM y reintenta la consulta.');
         else this.store.update('blocks', block.id, { state: 'source_processing', next_at: this.now() + 15000 });
       } else if (block.stage === 'generate') {
         if (block.baseline) return await this.reconcileAudio(book, block);

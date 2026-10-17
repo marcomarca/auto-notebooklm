@@ -104,6 +104,12 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
   };
 
   async function upload(req, book, url) {
+    try {
+      await accounts.checkWriteAccess(book);
+    } catch (err) {
+      req.resume();
+      throw err;
+    }
     const name = filename(url.searchParams.get('filename'));
     const rid = requestId(url.searchParams.get('requestId'));
     const existing = store.get('SELECT * FROM blocks WHERE book_id=? AND request_id=?', book.id, rid);
@@ -449,6 +455,35 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
           }
           store.updateBlockOutputPaths(book.id, exportsDir, { renameFiles: false });
           return send(res, 200, { ok: true, accepted, existing, rejected });
+        }
+        if (parts[3] === 'generations' && req.method === 'POST') {
+          await accounts.checkWriteAccess(book);
+          const { sourceIds, mode } = await body(req);
+          if (!Array.isArray(sourceIds) || !sourceIds.length) {
+            return send(res, 400, { error: 'Selecciona al menos una fuente para generar audio.' });
+          }
+          const genMode = mode && ['immediate', 'later'].includes(mode) ? mode : (book.generation_mode || 'immediate');
+          const queued = [];
+          for (const sId of sourceIds) {
+            const existingBlock = store.get('SELECT * FROM blocks WHERE book_id=? AND source_id=?', book.id, sId);
+            if (existingBlock) {
+              if (existingBlock.stage === 'source_ready') {
+                store.update('blocks', existingBlock.id, { stage: 'generate', state: 'ready', generation_mode: genMode });
+                queued.push(existingBlock.id);
+              }
+            } else {
+              const item = store.remoteItemByRemoteId(book.id, 'source', sId);
+              const sourceTitle = item?.title || 'Audio';
+              const block = store.addRemoteSourceBlock(book.id, {
+                sourceId: sId,
+                title: sourceTitle,
+                generationMode: genMode
+              });
+              queued.push(block.id);
+            }
+          }
+          store.update('books', book.id, { running: 1 });
+          return send(res, 200, { ok: true, queued });
         }
         if (parts[3] === 'open-folder' && req.method === 'POST') {
           const dir = resolve(join(exportsDir, exportDirName(book)));

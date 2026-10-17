@@ -75,6 +75,29 @@ export class Accounts {
     this.checks.set(id, task);
     try { return await task; } finally { this.checks.delete(id); }
   }
+  async checkWriteAccess(book) {
+    const id = book.profile;
+    const h = await this.check(id);
+    if (!h.ready) throw new ProviderError(h.errorCode || 'UNAVAILABLE', h.error || 'Cuenta sin conexión.');
+    if (!book.remote_id) return true;
+    const account = this.ensure(id);
+    const p = this.get(id);
+    if (!account.email && p.profiles) {
+      try {
+        const list = await p.profiles();
+        const me = list.find(x => x.id === id);
+        if (me?.email) account.email = me.email;
+      } catch {}
+    }
+    if (p.access) {
+      try {
+        await p.access(book.remote_id, account.email);
+      } catch (err) {
+        throw new ProviderError('ACCESS_DENIED', 'Esta cuenta no tiene permisos de edición en este cuaderno remoto. Se requiere permiso de editor para añadir material.');
+      }
+    }
+    return true;
+  }
   async verify(book, id) {
     const h = await this.check(id);
     if (!h.ready) throw new ProviderError(h.errorCode || 'UNAVAILABLE', h.error || 'Cuenta sin conexión.');
