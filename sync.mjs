@@ -169,6 +169,15 @@ export async function syncNotebook({ store, accounts, profile: rawProfile, remot
         const normStatus = normalizeStatus(a.status);
         const existing = store.remoteItemByRemoteId(book.id, 'artifact', aId);
         if (!existing) counts.new++; else counts.updated++;
+        let finalStatus = normStatus;
+        let finalErrorReason = a.error_reason || null;
+        if (existing && (existing.status === 'deleted_confirmed' || existing.status === 'reappeared')) {
+          finalStatus = 'reappeared';
+          finalErrorReason = 'El contenido eliminado reapareció en NotebookLM. Se requiere revisión manual.';
+        } else if (existing && existing.status === 'delete_uncertain') {
+          finalStatus = 'delete_uncertain';
+          finalErrorReason = 'Eliminación incierta; el elemento sigue presente en NotebookLM.';
+        }
         store.upsertRemoteItem({
           bookId: book.id,
           kind: 'artifact',
@@ -176,12 +185,12 @@ export async function syncNotebook({ store, accounts, profile: rawProfile, remot
           type: normType,
           originalType: a.type || null,
           title: a.title || 'Sin título',
-          status: normStatus,
+          status: finalStatus,
           originalStatus: String(a.status ?? ''),
           sourceIdsJson: JSON.stringify(a.source_ids || []),
           createdTime: a.created_time || (a.created_at ? Date.parse(a.created_at) : null),
           modifiedTime: a.modified_time || (a.modified_at ? Date.parse(a.modified_at) : null),
-          errorReason: a.error_reason || null,
+          errorReason: finalErrorReason,
           lastSeenAt: rev,
           syncRev: rev,
           blockId: blockMap.get(aId) || null
@@ -190,6 +199,14 @@ export async function syncNotebook({ store, accounts, profile: rawProfile, remot
       }
       if (results.artifacts.complete && !results.artifacts.truncated) {
         store.markAbsentRemoteItems(book.id, 'artifact', rev);
+        const pendingOps = store.all("SELECT * FROM remote_operations WHERE book_id=? AND type='delete_artifact' AND state='uncertain'", book.id);
+        for (const op of pendingOps) {
+          const item = store.remoteItemByRemoteId(book.id, 'artifact', op.target_id);
+          if (item && item.not_visible) {
+            store.update('remote_operations', op.id, { state: 'confirmed', completed_at: Date.now() });
+            store.update('remote_items', item.id, { status: 'deleted_confirmed' });
+          }
+        }
       }
     });
   }

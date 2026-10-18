@@ -48,6 +48,13 @@ export class FakeProvider {
     if(this.behavior.convert) throw this.behavior.convert;
     await mkdir(join(path,'..'),{recursive:true}); await writeFile(path,Buffer.alloc(512,2));
   }
+  async deleteArtifact(book, id) {
+    this.calls.push(['deleteArtifact', book, id]);
+    if (this.behavior.deleteArtifact) throw this.behavior.deleteArtifact;
+    const idx = this.remoteArtifacts.findIndex(a => (a.artifact_id || a.id) === id);
+    if (idx !== -1) this.remoteArtifacts.splice(idx, 1);
+    return { ok: true };
+  }
 }
 export async function fixture(t) {
   const dir=await mkdtemp(join(tmpdir(),'auto-nlm-test-'));

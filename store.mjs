@@ -406,7 +406,7 @@ export class Store {
   }
   recover() {
     // Interrupted creates remain uncertain. The worker reconciles them, never resubmits.
-    this.db.exec(`UPDATE blocks SET next_at=0 WHERE state IN ('uploading','submitting','queued','generating','source_processing','download','convert');
+    this.db.exec(`UPDATE blocks SET next_at=0 WHERE state IN ('uploading','submitting','queued','generating','source_processing','download','convert') AND canceled_at IS NULL;
       UPDATE books SET next_at=0 WHERE state='creating';`);
   }
   snapshot() {

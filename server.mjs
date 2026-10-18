@@ -485,6 +485,92 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
           store.update('books', book.id, { running: 1 });
           return send(res, 200, { ok: true, queued });
         }
+        if (parts[3] === 'cancel-pending' && req.method === 'POST') {
+          const payload = req.headers['content-length'] > 0 ? await body(req).catch(() => ({})) : {};
+          const blockIds = payload?.blockIds;
+          const allBlocks = store.blocks(book.id);
+          const targets = Array.isArray(blockIds) && blockIds.length
+            ? allBlocks.filter(b => blockIds.includes(b.id))
+            : allBlocks.filter(b => !['done', 'canceled'].includes(b.state));
+          let alreadyRemoteCount = 0;
+          let canceledCount = 0;
+          const details = [];
+          for (const b of targets) {
+            const r = queue.cancelBlock(b.id, payload?.reason || 'Cancelado por el usuario');
+            if (r.alreadyRemote) alreadyRemoteCount++;
+            if (!r.alreadyDone) canceledCount++;
+            details.push({ id: b.id, alreadyRemote: r.alreadyRemote, state: r.block.state });
+          }
+          return send(res, 200, {
+            ok: true,
+            canceledCount,
+            alreadyRemoteCount,
+            message: alreadyRemoteCount > 0
+              ? `${alreadyRemoteCount} trabajo(s) ya habían sido enviados a NotebookLM. Sus siguientes pasos locales se cancelaron, pero la generación remota puede continuar en Google.`
+              : `${canceledCount} trabajo(s) cancelados localmente.`,
+            details
+          });
+        }
+        if (parts[3] === 'artifacts' && parts[4] && parts[5] === 'delete' && req.method === 'POST') {
+          const itemId = parts[4];
+          const payload = await body(req);
+          if (!payload?.confirm) {
+            return send(res, 400, { error: 'Se requiere confirmación explícita para eliminar contenido remoto de NotebookLM.' });
+          }
+          await accounts.checkWriteAccess(book);
+          const item = store.remoteItemByRemoteId(book.id, 'artifact', itemId) ||
+            store.get('SELECT * FROM blocks WHERE book_id=? AND artifact_id=?', book.id, itemId);
+          if (!item) {
+            return send(res, 404, { error: 'El artefacto no pertenece a este cuaderno.' });
+          }
+          const block = store.get('SELECT * FROM blocks WHERE book_id=? AND artifact_id=?', book.id, itemId);
+          if (block && block.state !== 'done') {
+            queue.cancelBlock(block.id, 'Cancelado por eliminación remota');
+          }
+          const op = store.createRemoteOperation({
+            requestId: payload.requestId,
+            bookId: book.id,
+            profile: book.profile,
+            type: 'delete_artifact',
+            targetId: itemId,
+            state: 'running'
+          });
+          const provider = accounts.get(book.profile);
+          try {
+            await provider.deleteArtifact(book.remote_id, itemId);
+            let stillExists = false;
+            try {
+              const checkRows = await provider.artifacts(book.remote_id, itemId);
+              stillExists = checkRows.some(a => (a.artifact_id || a.id) === itemId);
+            } catch {
+              stillExists = false;
+            }
+            if (stillExists) {
+              store.update('remote_operations', op.id, {
+                state: 'uncertain',
+                error: 'La llamada de eliminación finalizó pero el elemento todavía aparece en NotebookLM.',
+                completed_at: Date.now()
+              });
+              if (item.id) store.update('remote_items', item.id, { status: 'delete_uncertain', error_reason: 'Eliminación incierta; sigue presente.' });
+              return send(res, 202, { ok: false, status: 'uncertain', operationId: op.id });
+            }
+            store.update('remote_operations', op.id, { state: 'confirmed', completed_at: Date.now() });
+            if (item.id) {
+              store.update('remote_items', item.id, { status: 'deleted_confirmed', not_visible: 1 });
+            }
+            return send(res, 200, { ok: true, status: 'confirmed', operationId: op.id });
+          } catch (err) {
+            store.update('remote_operations', op.id, {
+              state: 'uncertain',
+              error: redact(err.message),
+              completed_at: Date.now()
+            });
+            if (item.id) {
+              store.update('remote_items', item.id, { status: 'delete_uncertain', error_reason: redact(err.message) });
+            }
+            return send(res, 202, { ok: false, status: 'uncertain', operationId: op.id, error: redact(err.message) });
+          }
+        }
         if (parts[3] === 'open-folder' && req.method === 'POST') {
           const dir = resolve(join(exportsDir, exportDirName(book)));
           await mkdir(dir, { recursive: true });
@@ -562,6 +648,11 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
           return send(res, 200, { ok: true });
         }
         if (parts[3] === 'retry' && req.method === 'POST') { queue.retryBlock(block.id); return send(res, 200, { ok: true }); }
+        if (parts[3] === 'cancel' && req.method === 'POST') {
+          const payload = req.headers['content-length'] > 0 ? await body(req).catch(() => ({})) : {};
+          const result = queue.cancelBlock(block.id, payload?.reason);
+          return send(res, 200, result);
+        }
         if (parts[3] === 'audio' && ['GET', 'HEAD'].includes(req.method) && block.state === 'done') {
           const { size } = await import('node:fs/promises').then(fs => fs.stat(block.output_path));
           let start = 0, end = size - 1, status = 200;

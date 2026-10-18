@@ -30,14 +30,20 @@ export class CommandRunner {
     killer.on('error', () => child.kill());
     killer.on('close', code => { if (code !== 0) child.kill(); });
   }
-  run(binary, args, { timeout = 120000, env = {}, windowsHide = true, cwd } = {}) {
+  run(binary, args, { timeout = 120000, env = {}, windowsHide = true, cwd, signal } = {}) {
     if (this.closed) return Promise.reject(new ProviderError('UNAVAILABLE', 'La aplicación está cerrando.'));
+    if (signal?.aborted) return Promise.reject(new ProviderError('ABORTED', 'Operación cancelada localmente.', true));
     return new Promise((resolve, reject) => {
       const child = spawn(binary, args, { shell: false, windowsHide, cwd, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
       this.children.add(child);
       child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
       let stdout = '', stderr = '', failure;
       const timer = setTimeout(() => { failure = new ProviderError('TEMPORARY', 'La operación excedió su tiempo de espera.', true); this.terminate(child); }, timeout);
+      const onAbort = () => {
+        failure = new ProviderError('ABORTED', 'Operación cancelada localmente.', true);
+        this.terminate(child);
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
       const collect = which => data => {
         if (which === 'out') stdout += data.toString('utf8'); else stderr += data.toString('utf8');
         if (stdout.length + stderr.length > 16 * 1024 * 1024) {
@@ -47,7 +53,9 @@ export class CommandRunner {
       child.stdout.on('data', collect('out')); child.stderr.on('data', collect('err'));
       child.on('error', e => { failure = new ProviderError('UNAVAILABLE', `No se pudo ejecutar ${binary}: ${redact(e.message)}`); });
       child.on('close', code => {
-        clearTimeout(timer); this.children.delete(child);
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        this.children.delete(child);
         if (failure) reject(failure);
         else if (code !== 0) {
           const raw = (stderr || stdout || 'El proveedor terminó sin respuesta.').trim();
@@ -120,8 +128,8 @@ export class Provider {
       bridgeScript: this.bridgeScript,
     });
   }
-  async bridge(args, { parse = true, timeout = 120000, windowsHide = true } = {}) {
-    const stdout = await this.runner.run(this.python, [this.bridgeScript, ...args], { timeout, windowsHide, env: { NLM_PROFILE: this.profile, NO_COLOR: '1', TERM: 'dumb', COLUMNS: '240' } });
+  async bridge(args, { parse = true, timeout = 120000, windowsHide = true, signal } = {}) {
+    const stdout = await this.runner.run(this.python, [this.bridgeScript, ...args], { timeout, windowsHide, signal, env: { NLM_PROFILE: this.profile, NO_COLOR: '1', TERM: 'dumb', COLUMNS: '240' } });
     const result = parse ? json(stdout) : stdout;
     if (parse && result?.error) {
       const raw = result.error;
@@ -130,9 +138,9 @@ export class Provider {
     }
     return result;
   }
-  async cli(args, { parse = true, timeout = 120000, windowsHide = true } = {}) {
+  async cli(args, { parse = true, timeout = 120000, windowsHide = true, signal } = {}) {
     const fullArgs = [...this.nlmPrefixArgs, ...args];
-    const stdout = await this.runner.run(this.nlmBinary, fullArgs, { timeout, windowsHide, env: { NLM_PROFILE: this.profile, NO_COLOR: '1', TERM: 'dumb', COLUMNS: '240' } });
+    const stdout = await this.runner.run(this.nlmBinary, fullArgs, { timeout, windowsHide, signal, env: { NLM_PROFILE: this.profile, NO_COLOR: '1', TERM: 'dumb', COLUMNS: '240' } });
     const result = parse ? json(stdout) : stdout;
     if (parse && result?.error) {
       const raw = result.error;
@@ -253,21 +261,37 @@ export class Provider {
     }
     return remoteId(r.artifact_id);
   }
-  async download(bookId, artifactId, destination) {
+  async deleteArtifact(bookId, artifactId) {
+    const args = ['studio', 'delete', remoteId(bookId), remoteId(artifactId), '--confirm', '-p', this.profile];
+    return this.cli(args, { parse: false });
+  }
+  async download(bookId, artifactId, destination, { signal } = {}) {
     await mkdir(dirname(destination), { recursive: true });
     const tmp = `${destination}.part.m4a`;
     await rm(tmp, { force: true });
-    await this.cli(['download', 'audio', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--no-progress'], { parse: false, timeout: 660000 });
-    await this.validate(tmp); await rename(tmp, destination);
+    try {
+      await this.cli(['download', 'audio', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--no-progress'], { parse: false, timeout: 660000, signal });
+      await this.validate(tmp, { signal });
+      await rename(tmp, destination);
+    } catch (e) {
+      await rm(tmp, { force: true });
+      throw e;
+    }
   }
-  async validate(file) {
+  async validate(file, { signal } = {}) {
     if ((await stat(file)).size < 128) throw new ProviderError('TEMPORARY', 'El audio descargado está vacío o incompleto.');
-    await this.runner.run(this.ffmpeg, ['-v', 'error', '-xerror', '-i', file, '-map', '0:a:0', '-f', 'null', '-'], { timeout: 180000 });
+    await this.runner.run(this.ffmpeg, ['-v', 'error', '-xerror', '-i', file, '-map', '0:a:0', '-f', 'null', '-'], { timeout: 180000, signal });
   }
-  async convert(original, destination) {
+  async convert(original, destination, { signal } = {}) {
     const tmp = `${destination}.part.mp3`;
-    await this.runner.run(this.ffmpeg, ['-nostdin', '-v', 'error', '-y', '-i', original, '-map', '0:a:0', '-vn', '-c:a', 'libmp3lame', '-q:a', '2', tmp], { timeout: 300000 });
-    await this.validate(tmp); await rename(tmp, destination);
+    try {
+      await this.runner.run(this.ffmpeg, ['-nostdin', '-v', 'error', '-y', '-i', original, '-map', '0:a:0', '-vn', '-c:a', 'libmp3lame', '-q:a', '2', tmp], { timeout: 300000, signal });
+      await this.validate(tmp, { signal });
+      await rename(tmp, destination);
+    } catch (e) {
+      await rm(tmp, { force: true });
+      throw e;
+    }
   }
   close() { return this.runner.close(); }
 }

@@ -19,6 +19,7 @@ export class Queue {
     this.store = store; this.provider = provider; this.dataDir = dataDir; this.exportsDir = exportsDir; this.now = now;
     this.busy = false; this.stopped = false; this.active = null;
     this.accounts = accounts;
+    this.controllers = new Map();
     store.recover();
   }
   start() {
@@ -28,6 +29,8 @@ export class Queue {
   }
   async stop() {
     this.stopped = true; clearInterval(this.timer);
+    for (const controller of this.controllers.values()) controller.abort();
+    this.controllers.clear();
     if (this.accounts) await this.accounts.close(); else await this.provider.close();
     if (this.active) await this.active;
   }
@@ -42,7 +45,7 @@ export class Queue {
     const books = this.store.books().filter(b => this.accounts || b.profile === this.provider.profile);
     // Track an already submitted audio even if the book was paused or quota ran out.
     const all = books.flatMap(book => this.store.blocks(book.id).map(block => ({ book, block })));
-    const runnable = b => !['done', 'review', 'auth'].includes(b.state) && b.next_at <= now && !(b.state === 'error' && b.attempts > 3);
+    const runnable = b => !['done', 'review', 'auth', 'canceled'].includes(b.state) && !b.canceled_at && b.next_at <= now && !(b.state === 'error' && b.attempts > 3);
 
     // 1. Fast local download & convert jobs
     const local = all.find(({ block }) => ['download', 'convert'].includes(block.stage) && runnable(block));
@@ -119,9 +122,25 @@ export class Queue {
     const rows = await this.providerFor(book, block).artifacts(book.remote_id);
     const matches = rows.filter(a => !before.includes(a.artifact_id || a.id) && a.type === 'audio' && a.source_ids?.length === 1 && a.source_ids[0] === block.source_id);
     if (matches.length !== 1) throw new ProviderError('REVIEW', 'No se pudo identificar un único audio de esta fuente. No se solicitará otro: comprueba el cuaderno y vuelve a consultar.');
-    this.store.update('blocks', block.id, { artifact_id: matches[0].artifact_id || matches[0].id, baseline: null, stage: 'poll', state: 'generating', attempts: 0, next_at: 0, error: null, error_code: null });
+    const artId = matches[0].artifact_id || matches[0].id;
+    if (block.cancel_requested_at || block.canceled_at) {
+      this.store.update('blocks', block.id, {
+        artifact_id: artId,
+        baseline: null,
+        state: 'canceled',
+        canceled_at: block.canceled_at || this.now(),
+        error: 'Cancelado localmente. La generación remota continuó en Google.',
+        error_code: 'CANCELED'
+      });
+      return;
+    }
+    this.store.update('blocks', block.id, { artifact_id: artId, baseline: null, stage: 'poll', state: 'generating', attempts: 0, next_at: 0, error: null, error_code: null });
   }
   async runBlock(book, block) {
+    const initial = this.store.block(block.id);
+    if (!initial || initial.canceled_at || initial.cancel_requested_at || initial.state === 'canceled') return;
+    const controller = new AbortController();
+    this.controllers.set(block.id, controller);
     let provider = this.providerFor(book, block);
     try {
       if (block.stage === 'upload') {
@@ -173,13 +192,37 @@ export class Queue {
           if (retryAt) return this.defer(book, block, retryAt);
         }
         const before = ids(await provider.artifacts(book.remote_id));
-        // The pause may have arrived while the preflight request was running.
-        if (!this.store.book(book.id).running) return;
+        // Check cancellation and running status right after preflight
+        const checkBeforeDispatch = this.store.block(block.id);
+        if (!this.store.book(book.id).running || checkBeforeDispatch.cancel_requested_at || checkBeforeDispatch.canceled_at) {
+          if (checkBeforeDispatch.cancel_requested_at && !checkBeforeDispatch.canceled_at) {
+            this.store.update('blocks', block.id, {
+              canceled_at: this.now(),
+              state: 'canceled',
+              baseline: null,
+              error: 'Cancelado localmente antes de enviar a Google.',
+              error_code: 'CANCELED'
+            });
+          }
+          return;
+        }
         if (this.accounts && (!this.accounts.ensure(provider.profile).enabled ||
           (provider.profile !== book.profile && !this.store.get('SELECT profile FROM book_accounts WHERE book_id=? AND profile=?', book.id, provider.profile)))) return;
         this.store.update('books', book.id, { quota_at: 0, quota_error: null });
         this.store.update('blocks', block.id, { state: 'submitting', locked: 1, generation_profile: provider.profile, baseline: JSON.stringify(before), started_at: this.now() });
         const artifactId = await provider.generate(book.remote_id, block.source_id, { defer: isLater });
+        const afterGen = this.store.block(block.id);
+        if (afterGen.cancel_requested_at || afterGen.canceled_at) {
+          this.store.update('blocks', block.id, {
+            artifact_id: artifactId,
+            baseline: null,
+            state: 'canceled',
+            canceled_at: afterGen.canceled_at || this.now(),
+            error: 'Cancelado localmente. La generación remota puede haber continuado en Google.',
+            error_code: 'CANCELED'
+          });
+          return;
+        }
         this.store.update('blocks', block.id, { artifact_id: artifactId, baseline: null, state: isLater ? 'deferred' : 'generating', stage: 'poll', attempts: 0, next_at: this.now() + 15000, error: null, error_code: null });
       } else if (block.stage === 'poll') {
         const rows = await provider.artifacts(book.remote_id, block.artifact_id);
@@ -207,13 +250,23 @@ export class Queue {
           this.store.update('blocks', block.id, { state: stateLabel, poll_count: block.poll_count + 1, next_at: this.now() + pollDelay, attempts: 0, error: null, error_code: null });
         }
       } else if (block.stage === 'download') {
-        if (!(await exists(block.original_path))) await provider.download(book.remote_id, block.artifact_id, block.original_path);
+        if (!(await exists(block.original_path))) await provider.download(book.remote_id, block.artifact_id, block.original_path, { signal: controller.signal });
         this.store.update('blocks', block.id, { state: 'convert', stage: 'convert', next_at: 0, attempts: 0, error: null, error_code: null });
       } else if (block.stage === 'convert') {
-        await provider.convert(block.original_path, block.output_path);
+        await provider.convert(block.original_path, block.output_path, { signal: controller.signal });
         this.store.update('blocks', block.id, { state: 'done', next_at: 0, attempts: 0, error: null, error_code: null });
       }
     } catch (error) {
+      if (error.code === 'ABORTED') {
+        const cur = this.store.block(block.id);
+        this.store.update('blocks', block.id, {
+          state: 'canceled',
+          canceled_at: cur?.canceled_at || this.now(),
+          error: 'Operación cancelada localmente.',
+          error_code: 'CANCELED'
+        });
+        return;
+      }
       const current = this.store.block(block.id);
       if (block.baseline && current.baseline) error.uncertain = true;
       // Before dispatch there is no uncertain operation: a failed preflight can use a backup.
@@ -234,7 +287,39 @@ export class Queue {
         return this.defer(book, current, quotaRetry(usage, this.now()) || this.now() + thirtyMinutes, redact(error.message));
       }
       this.fail('blocks', current, error, provider);
+    } finally {
+      this.controllers.delete(block.id);
     }
+  }
+  cancelBlock(id, reason = 'Cancelado por el usuario') {
+    const block = this.store.block(id);
+    if (!block) throw new Error('Bloque inexistente.');
+    const now = this.now();
+    if (block.state === 'done') {
+      return { ok: true, alreadyDone: true, block };
+    }
+    const alreadyRemote = Boolean(block.artifact_id || (block.stage === 'generate' && block.baseline));
+    this.store.update('blocks', block.id, {
+      cancel_requested_at: block.cancel_requested_at || now,
+      canceled_at: now,
+      cancel_reason: reason,
+      state: 'canceled',
+      error: alreadyRemote
+        ? 'Cancelado localmente. La generación remota puede continuar en Google.'
+        : 'Cancelado localmente antes de enviar a Google.',
+      error_code: 'CANCELED'
+    });
+    const controller = this.controllers.get(id);
+    if (controller) {
+      controller.abort();
+      this.controllers.delete(id);
+    }
+    return {
+      ok: true,
+      alreadyRemote,
+      alreadyDone: false,
+      block: this.store.block(id)
+    };
   }
   defer(book, block, retryAt, message = 'Cuota agotada. Generar más tarde activado: los pendientes continuarán automáticamente cuando se restablezca la cuota.') {
     this.store.update('books', book.id, { quota_at: retryAt, quota_error: message });
@@ -262,6 +347,7 @@ export class Queue {
   retryBlock(id) {
     const block = this.store.block(id);
     if (!block) throw new Error('Bloque inexistente.');
+    if (block.canceled_at || block.state === 'canceled') return;
     if (!['error', 'review', 'auth', 'quota'].includes(block.state)) return;
     const changes = { state: block.baseline ? (block.stage === 'upload' ? 'uploading' : 'submitting') : ({ upload: 'upload_pending', source: 'source_processing', generate: 'ready', poll: 'generating', download: 'download', convert: 'convert' }[block.stage]), attempts: 0, next_at: 0, error: null, error_code: null };
     if (block.error_code === 'ARTIFACT_FAILED' && !block.hash?.startsWith('remote-')) Object.assign(changes, { stage: 'generate', state: 'ready', artifact_id: null, baseline: null });
