@@ -9,6 +9,7 @@ import { join, dirname, extname, resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store, title, safeName, exportDirName } from './store.mjs';
 import { Provider, redact } from './provider.mjs';
+import { ConnectorGate } from './connector-gate.mjs';
 import { Queue } from './queue.mjs';
 import { Accounts, profileId } from './accounts.mjs';
 import { syncNotebook } from './sync.mjs';
@@ -100,13 +101,19 @@ function requestId(value) {
   return value;
 }
 
-export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultExportsDir, provider = new Provider({ profile: process.env.NLM_PROFILE || 'default' }), accountFactory, port = Number(process.env.PORT || 4318), worker = true, check = true, allowHttpShutdown = true } = {}) {
+export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultExportsDir, gate, provider, accountFactory, port = Number(process.env.PORT || 4318), worker = true, check = true, allowHttpShutdown = true } = {}) {
   await mkdir(dataDir, { recursive: true });
   const releaseLock = await acquireLock(dataDir);
   let store;
   try { store = new Store(join(dataDir, 'queue.sqlite')); } catch (e) { await releaseLock(); throw e; }
-  const accounts = new Accounts(store, provider, { factory: accountFactory });
-  const queue = new Queue(store, provider, { dataDir, exportsDir, accounts });
+  const connectorGate = gate || provider?.gate || new ConnectorGate();
+  if (!provider) {
+    provider = new Provider({ profile: process.env.NLM_PROFILE || 'default', gate: connectorGate });
+  } else if (!provider.gate) {
+    provider.gate = connectorGate;
+  }
+  const accounts = new Accounts(store, provider, { factory: accountFactory, gate: connectorGate });
+  const queue = new Queue(store, provider, { dataDir, exportsDir, accounts, gate: connectorGate });
   const token = randomBytes(32).toString('hex');
   let origin, closed = false, shutdown, initialization;
   const completion = Promise.withResolvers();
@@ -816,18 +823,18 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
   server.requestTimeout = 10 * 60 * 1000;
   try {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
-  } catch (e) { store.close(); await provider.close(); await releaseLock(); throw e; }
+  } catch (e) { store.close(); await provider.close(); await connectorGate.close(); await releaseLock(); throw e; }
   origin = `http://127.0.0.1:${server.address().port}`;
   if (check) initialization = healthCheck().catch(e => { provider.health.error = redact(e.message); });
   if (worker) queue.start();
   shutdown = async () => {
       if (closed) return; closed = true;
       const closing = new Promise(resolve => server.close(resolve));
-      server.closeAllConnections(); await queue.stop(); await initialization; await closing; store.close();
+      server.closeAllConnections(); await queue.stop(); await connectorGate.close(); await initialization; await closing; store.close();
       await releaseLock();
       completion.resolve();
   };
-  return { server, store, queue, provider, accounts, origin, token, close: shutdown, finished: completion.promise };
+  return { server, store, queue, provider, accounts, gate: connectorGate, origin, token, close: shutdown, finished: completion.promise };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

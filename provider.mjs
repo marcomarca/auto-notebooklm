@@ -97,7 +97,9 @@ function array(value, key) {
 export class Provider {
   constructor({
     profile = 'default',
-    runner = new CommandRunner(),
+    runner,
+    runnerFactory = () => new CommandRunner(),
+    gate,
     nlm = process.env.NLM_BINARY || 'nlm',
     nlmBinary,
     nlmPrefixArgs = [],
@@ -107,7 +109,9 @@ export class Provider {
   } = {}) {
     if (!/^[\w-]{1,80}$/.test(profile)) throw new Error('NLM_PROFILE inválido.');
     this.profile = profile;
-    this.runner = runner;
+    this.runnerFactory = runnerFactory;
+    this.runner = runner || runnerFactory(profile);
+    this.gate = gate;
     this.nlmBinary = nlmBinary || nlm;
     this.nlm = this.nlmBinary;
     this.nlmPrefixArgs = Array.isArray(nlmPrefixArgs) ? [...nlmPrefixArgs] : [];
@@ -119,7 +123,9 @@ export class Provider {
   forProfile(profile) {
     return new Provider({
       profile,
-      runner: new CommandRunner(),
+      runner: this.runnerFactory(profile),
+      runnerFactory: this.runnerFactory,
+      gate: this.gate,
       nlmBinary: this.nlmBinary,
       nlm: this.nlmBinary,
       nlmPrefixArgs: this.nlmPrefixArgs,
@@ -129,25 +135,31 @@ export class Provider {
     });
   }
   async bridge(args, { parse = true, timeout = 120000, windowsHide = true, signal } = {}) {
-    const stdout = await this.runner.run(this.python, [this.bridgeScript, ...args], { timeout, windowsHide, signal, env: { NLM_PROFILE: this.profile, NO_COLOR: '1', TERM: 'dumb', COLUMNS: '240' } });
-    const result = parse ? json(stdout) : stdout;
-    if (parse && result?.error) {
-      const raw = result.error;
-      const message = redact(typeof raw === 'object' ? (raw.error || raw.message || JSON.stringify(raw)) : String(raw));
-      throw new ProviderError(classify(message), message);
-    }
-    return result;
+    const exec = async () => {
+      const stdout = await this.runner.run(this.python, [this.bridgeScript, ...args], { timeout, windowsHide, signal, env: { NLM_PROFILE: this.profile, NO_COLOR: '1', TERM: 'dumb', COLUMNS: '240' } });
+      const result = parse ? json(stdout) : stdout;
+      if (parse && result?.error) {
+        const raw = result.error;
+        const message = redact(typeof raw === 'object' ? (raw.error || raw.message || JSON.stringify(raw)) : String(raw));
+        throw new ProviderError(classify(message), message);
+      }
+      return result;
+    };
+    return this.gate ? this.gate.withPermit(exec, { signal }) : exec();
   }
   async cli(args, { parse = true, timeout = 120000, windowsHide = true, signal } = {}) {
-    const fullArgs = [...this.nlmPrefixArgs, ...args];
-    const stdout = await this.runner.run(this.nlmBinary, fullArgs, { timeout, windowsHide, signal, env: { NLM_PROFILE: this.profile, NO_COLOR: '1', TERM: 'dumb', COLUMNS: '240' } });
-    const result = parse ? json(stdout) : stdout;
-    if (parse && result?.error) {
-      const raw = result.error;
-      const message = redact(typeof raw === 'object' ? (raw.error || raw.message || JSON.stringify(raw)) : String(raw));
-      throw new ProviderError(classify(message), message);
-    }
-    return result;
+    const exec = async () => {
+      const fullArgs = [...this.nlmPrefixArgs, ...args];
+      const stdout = await this.runner.run(this.nlmBinary, fullArgs, { timeout, windowsHide, signal, env: { NLM_PROFILE: this.profile, NO_COLOR: '1', TERM: 'dumb', COLUMNS: '240' } });
+      const result = parse ? json(stdout) : stdout;
+      if (parse && result?.error) {
+        const raw = result.error;
+        const message = redact(typeof raw === 'object' ? (raw.error || raw.message || JSON.stringify(raw)) : String(raw));
+        throw new ProviderError(classify(message), message);
+      }
+      return result;
+    };
+    return this.gate ? this.gate.withPermit(exec, { signal }) : exec();
   }
   async check() {
     const h = { ready: false, profile: this.profile, cli: false, ffmpeg: false, auth: false, error: null };
