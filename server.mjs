@@ -13,6 +13,7 @@ import { ConnectorGate } from './connector-gate.mjs';
 import { Queue } from './queue.mjs';
 import { Accounts, profileId } from './accounts.mjs';
 import { syncNotebook } from './sync.mjs';
+import { validateRecipe, previewProductionPlan, confirmProductionPlan } from './production.mjs';
 import { version as appVersion, mode, dataDir as defaultDataDir, exportsDir as defaultExportsDir } from './runtime.mjs';
 
 export function openInExplorer(targetPath) {
@@ -350,6 +351,49 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
           }
         }
       }
+      if (req.method === 'GET' && url.pathname === '/api/recipes') {
+        return send(res, 200, {
+          ok: true,
+          recipes: store.recipes().map(r => ({ ...r, config: JSON.parse(r.config_json) }))
+        });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/recipes') {
+        const { id, name, config } = await body(req);
+        if (!name) return send(res, 400, { error: 'Nombre de receta requerido.' });
+        validateRecipe(config);
+        const created = store.createRecipe({ id, name, config });
+        return send(res, 201, {
+          ok: true,
+          recipe: { ...created, config: JSON.parse(created.config_json) }
+        });
+      }
+      if (req.method === 'GET' && url.pathname === '/api/library/search') {
+        const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+        const profile = url.searchParams.get('profile');
+        const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
+        const limit = Math.max(1, Math.min(100, Number(url.searchParams.get('limit')) || 20));
+        let books = store.books();
+        if (profile) books = books.filter(b => b.profile === profile);
+        if (q) {
+          books = books.filter(b => {
+            const bMatches = b.title.toLowerCase().includes(q) || b.remote_title?.toLowerCase().includes(q);
+            if (bMatches) return true;
+            const blks = store.blocks(b.id);
+            return blks.some(bl => bl.title.toLowerCase().includes(q) || bl.filename?.toLowerCase().includes(q));
+          });
+        }
+        const total = books.length;
+        const start = (page - 1) * limit;
+        const items = books.slice(start, start + limit).map(b => ({
+          id: b.id,
+          title: b.title,
+          remoteTitle: b.remote_title,
+          profile: b.profile,
+          state: b.state,
+          blocksCount: store.blocks(b.id).length
+        }));
+        return send(res, 200, { ok: true, items, pagination: { page, limit, total } });
+      }
       if (req.method === 'GET' && url.pathname === '/api/books') return send(res, 200, store.snapshot());
       if (req.method === 'POST' && url.pathname === '/api/books') {
         const book = store.createBook(await body(req), accounts.current);
@@ -358,6 +402,58 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
       if (parts[0] === 'api' && parts[1] === 'books' && parts[2]) {
         const book = store.book(parts[2]);
         if (!book) return send(res, 404, { error: 'Libro inexistente.' });
+        if (parts[3] === 'production') {
+          if (parts[4] === 'preview' && req.method === 'POST') {
+            const payload = req.headers['content-length'] > 0 ? await body(req).catch(() => ({})) : {};
+            const preview = previewProductionPlan({
+              store,
+              bookId: book.id,
+              recipeId: payload?.recipeId,
+              recipeVersion: payload?.recipeVersion,
+              blockIds: payload?.blockIds
+            });
+            return send(res, 200, { ok: true, ...preview });
+          }
+          if (parts[4] === 'plan' && req.method === 'POST') {
+            const payload = await body(req);
+            try {
+              const confirmed = confirmProductionPlan({
+                store,
+                bookId: book.id,
+                recipeId: payload.recipeId,
+                recipeVersion: payload.recipeVersion,
+                blockIds: payload.blockIds,
+                requestId: payload.requestId,
+                expectedRevision: payload.expectedRevision
+              });
+              return send(res, 200, confirmed);
+            } catch (err) {
+              if (err.status === 409 || err.code === 'CONFLICT') {
+                return send(res, 409, { error: err.message });
+              }
+              throw err;
+            }
+          }
+          if (parts[4] === 'control' && req.method === 'POST') {
+            const { action } = await body(req);
+            if (!['start', 'pause'].includes(action)) throw new Error('Acción de producción inválida.');
+            const running = action === 'start' ? 1 : 0;
+            store.update('books', book.id, { running });
+            if (running) {
+              store.db.prepare("UPDATE material_tasks SET state='queued', updated_at=? WHERE book_id=? AND is_current=1 AND state='planned'").run(Date.now(), book.id);
+            }
+            return send(res, 200, { ok: true, running });
+          }
+        }
+        if (parts[3] === 'materials' && req.method === 'GET') {
+          const page = Number(url.searchParams.get('page')) || 1;
+          const limit = Number(url.searchParams.get('limit')) || 50;
+          const type = url.searchParams.get('type') || undefined;
+          const state = url.searchParams.get('state') || undefined;
+          const editorialState = url.searchParams.get('editorialState') || undefined;
+          const result = store.materialMatrix(book.id, { page, limit, type, state, editorialState });
+          return send(res, 200, result);
+        }
         if (parts[3] === 'accounts' && req.method === 'PUT') {
           await accounts.configure(book, (await body(req)).profiles); return send(res, 200, { ok: true });
         }
@@ -804,6 +900,31 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
             ...(status === 206 ? { 'Content-Range': `bytes ${start}-${end}/${size}` } : {}) });
           if (req.method === 'HEAD') return res.end();
           await pipeline(createReadStream(block.output_path, { start, end }), res); return;
+        }
+      }
+      if (parts[0] === 'api' && parts[1] === 'materials' && parts[2]) {
+        const task = store.materialTask(parts[2]);
+        if (!task) return send(res, 404, { error: 'Tarea de material inexistente.' });
+        if (parts[3] === 'action' && req.method === 'POST') {
+          const { action, reason } = await body(req);
+          if (action === 'approve') {
+            const updated = store.approveMaterialTask(task.id);
+            return send(res, 200, { ok: true, task: updated });
+          } else if (action === 'reject') {
+            const updated = store.rejectMaterialTask(task.id);
+            return send(res, 200, { ok: true, task: updated });
+          } else if (action === 'retry') {
+            const updated = queue.retryMaterialTask(task.id);
+            return send(res, 200, { ok: true, task: updated });
+          } else if (action === 'cancel') {
+            const result = queue.cancelMaterialTask(task.id, reason);
+            return send(res, 200, result);
+          } else if (action === 'revision') {
+            const updated = store.createMaterialRevision(task.id);
+            return send(res, 201, { ok: true, task: updated });
+          } else {
+            return send(res, 400, { error: 'Acción de material inválida.' });
+          }
         }
       }
       if (req.method === 'GET') {

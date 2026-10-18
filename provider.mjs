@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { stat, mkdir, rename, rm } from 'node:fs/promises';
+import { stat, mkdir, rename, rm, open } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 export class ProviderError extends Error {
@@ -271,7 +271,32 @@ export class Provider {
       r = await this.cli(['audio', 'create', remoteId(bookId), '--source-ids', source, '--format', 'deep_dive',
         '--length', 'default', '--language', 'es-419', '--confirm', '--json', '-p', this.profile]);
     }
-    return remoteId(r.artifact_id);
+    return remoteId(r.artifact_id || r.id);
+  }
+  async generateInfographic(bookId, sourceId, {
+    orientation = 'landscape',
+    detail = 'standard',
+    style = 'auto_select',
+    language = 'es-419',
+    focus
+  } = {}) {
+    const source = remoteId(sourceId);
+    const args = [
+      'infographic', 'create', remoteId(bookId),
+      '--source-ids', source,
+      '--orientation', orientation,
+      '--detail', detail,
+      '--style', style,
+      '--language', language,
+      '--confirm',
+      '--json',
+      '-p', this.profile
+    ];
+    if (focus && typeof focus === 'string') {
+      args.push('--focus', focus);
+    }
+    const r = await this.cli(args);
+    return remoteId(r.artifact_id || r.id);
   }
   async deleteArtifact(bookId, artifactId) {
     const args = ['studio', 'delete', remoteId(bookId), remoteId(artifactId), '--confirm', '-p', this.profile];
@@ -293,6 +318,33 @@ export class Provider {
   async validate(file, { signal } = {}) {
     if ((await stat(file)).size < 128) throw new ProviderError('TEMPORARY', 'El audio descargado está vacío o incompleto.');
     await this.runner.run(this.ffmpeg, ['-v', 'error', '-xerror', '-i', file, '-map', '0:a:0', '-f', 'null', '-'], { timeout: 180000, signal });
+  }
+  async validateImage(file, { signal } = {}) {
+    const s = await stat(file);
+    if (s.size < 64) throw new ProviderError('TEMPORARY', 'La infografía descargada está vacía o incompleta.');
+    const fd = await open(file, 'r');
+    const header = Buffer.alloc(24);
+    try {
+      await fd.read(header, 0, 24, 0);
+    } finally {
+      await fd.close();
+    }
+    const isPng = header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4E && header[3] === 0x47 &&
+                  header[4] === 0x0D && header[5] === 0x0A && header[6] === 0x1A && header[7] === 0x0A;
+    if (isPng) {
+      const width = header.readUInt32BE(16);
+      const height = header.readUInt32BE(20);
+      if (width === 0 || height === 0) {
+        throw new ProviderError('TEMPORARY', 'La infografía tiene dimensiones inválidas.');
+      }
+    }
+    if (this.ffmpeg) {
+      try {
+        await this.runner.run(this.ffmpeg, ['-v', 'error', '-xerror', '-i', file, '-f', 'null', '-'], { timeout: 60000, signal });
+      } catch (e) {
+        throw new ProviderError('TEMPORARY', `La infografía no se pudo decodificar: ${redact(e.message)}`);
+      }
+    }
   }
   async convert(original, destination, { signal } = {}) {
     const tmp = `${destination}.part.mp3`;
@@ -351,7 +403,7 @@ export class Provider {
     await rm(tmp, { force: true });
     try {
       await this.cli(['download', 'infographic', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--no-progress', '-p', this.profile], { parse: false, timeout: 180000, signal });
-      if ((await stat(tmp)).size === 0) throw new ProviderError('TEMPORARY', 'La infografía descargada está vacía.');
+      await this.validateImage(tmp, { signal });
       await rename(tmp, destination);
     } catch (e) {
       await rm(tmp, { force: true });

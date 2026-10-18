@@ -327,10 +327,21 @@ export class Store {
             infographic: { enabled: false }
           }
         });
+        const studyBookRecipeJson = JSON.stringify({
+          name: 'Libro de estudio (Audio + Infografía)',
+          materials: {
+            audio: { enabled: true, language: 'es-419', format: 'deep_dive', length: 'default' },
+            infographic: { enabled: true, language: 'es-419' }
+          }
+        });
         this.db.prepare(`
           INSERT OR IGNORE INTO production_recipes (id, version, name, config_json, created_at)
           VALUES ('default-audio', 1, 'Audio estándar', ?, ?)
         `).run(defaultRecipeJson, Date.now());
+        this.db.prepare(`
+          INSERT OR IGNORE INTO production_recipes (id, version, name, config_json, created_at)
+          VALUES ('study-book', 1, 'Libro de estudio (Audio + Infografía)', ?, ?)
+        `).run(studyBookRecipeJson, Date.now());
 
         const allBlocks = this.all('SELECT * FROM blocks');
         for (const b of allBlocks) {
@@ -971,6 +982,143 @@ export class Store {
     sql += ' ORDER BY created_at DESC LIMIT ?';
     params.push(limit);
     return this.all(sql, ...params);
+  }
+  materialMatrix(bookId, { page = 1, limit = 50, type, state, editorialState } = {}) {
+    const book = this.book(bookId);
+    if (!book) throw new Error('Libro inexistente.');
+
+    const allBlocks = this.blocks(bookId);
+    const allTasks = this.materialTasks(bookId, { currentOnly: true });
+    const tasksByBlock = new Map();
+    for (const task of allTasks) {
+      if (!tasksByBlock.has(task.block_id)) tasksByBlock.set(task.block_id, {});
+      tasksByBlock.get(task.block_id)[task.type] = task;
+    }
+
+    const summary = {
+      totalBlocks: allBlocks.length,
+      totalRequirements: allTasks.length,
+      ready: 0,
+      approved: 0,
+      waiting: 0,
+      reviewRequired: 0,
+      failed: 0,
+      canceled: 0,
+      outdated: 0
+    };
+
+    for (const task of allTasks) {
+      if (task.state === 'ready') summary.ready++;
+      if (task.editorial_state === 'approved') summary.approved++;
+      if (['planned', 'queued', 'submitting', 'remote_pending', 'download_pending', 'waiting_quota', 'waiting_auth', 'retry_wait'].includes(task.state)) {
+        summary.waiting++;
+      }
+      if (task.state === 'review_required') summary.reviewRequired++;
+      if (task.state === 'failed') summary.failed++;
+      if (task.state === 'canceled') summary.canceled++;
+      const block = allBlocks.find(b => b.id === task.block_id);
+      if (block && task.source_fingerprint && block.hash && task.source_fingerprint !== block.hash) {
+        summary.outdated++;
+      }
+    }
+
+    let filteredBlocks = allBlocks;
+    if (type || state || editorialState) {
+      filteredBlocks = allBlocks.filter(b => {
+        const mats = tasksByBlock.get(b.id) || {};
+        const targetTasks = type ? (mats[type] ? [mats[type]] : []) : Object.values(mats);
+        if (!targetTasks.length) return false;
+        if (state && !targetTasks.some(t => t.state === state)) return false;
+        if (editorialState && !targetTasks.some(t => t.editorial_state === editorialState)) return false;
+        return true;
+      });
+    }
+
+    const total = filteredBlocks.length;
+    const pageNum = Math.max(1, Number(page) || 1);
+    const limitNum = Math.max(1, Math.min(200, Number(limit) || 50));
+    const start = (pageNum - 1) * limitNum;
+    const pagedBlocks = filteredBlocks.slice(start, start + limitNum);
+
+    const matrix = pagedBlocks.map(block => ({
+      blockId: block.id,
+      blockNumber: block.position,
+      title: block.title,
+      sourceId: block.source_id,
+      hash: block.hash,
+      materials: tasksByBlock.get(block.id) || {}
+    }));
+
+    return {
+      ok: true,
+      bookId,
+      summary,
+      matrix,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total
+      }
+    };
+  }
+  approveMaterialTask(id) {
+    return this.updateMaterialTask(id, { editorial_state: 'approved' });
+  }
+  rejectMaterialTask(id) {
+    return this.updateMaterialTask(id, { editorial_state: 'rejected' });
+  }
+  retryMaterialTask(id) {
+    const task = this.materialTask(id);
+    if (!task) throw new Error('Tarea de material inexistente.');
+    const attempts = this.materialAttempts(id);
+    const lastAttempt = attempts.at(-1);
+    const hasArtifact = !!(lastAttempt?.artifact_id || task.selected_remote_item_id);
+    const targetState = hasArtifact ? 'download_pending' : 'queued';
+    return this.updateMaterialTask(id, {
+      state: targetState,
+      retry_count: 0,
+      next_at: 0,
+      error: null,
+      error_code: null
+    });
+  }
+  cancelMaterialTask(id, reason = 'Cancelado por el usuario') {
+    const task = this.materialTask(id);
+    if (!task) throw new Error('Tarea de material inexistente.');
+    if (task.state === 'ready') return { ok: true, alreadyDone: true, task };
+    const now = Date.now();
+    return this.updateMaterialTask(id, {
+      state: 'canceled',
+      canceled_at: now,
+      error: reason,
+      error_code: 'CANCELED'
+    });
+  }
+  createMaterialRevision(id) {
+    return this.transaction(() => {
+      const task = this.materialTask(id);
+      if (!task) throw new Error('Tarea de material inexistente.');
+      const block = this.block(task.block_id);
+      if (!block) throw new Error('Bloque inexistente.');
+
+      const nextRev = task.revision + 1;
+      const newTask = this.createMaterialTask({
+        bookId: task.book_id,
+        blockId: task.block_id,
+        type: task.type,
+        revision: nextRev,
+        isCurrent: true,
+        sourceFingerprint: block.hash || task.source_fingerprint,
+        recipeId: task.recipe_id,
+        recipeVersion: task.recipe_version,
+        params: task.params_json ? JSON.parse(task.params_json) : {},
+        paramsHash: task.params_hash,
+        state: 'planned',
+        editorialState: 'unreviewed',
+        reason: `Nueva revisión ${nextRev}`
+      });
+      return newTask;
+    });
   }
   close() { this.db.close(); }
 }

@@ -39,6 +39,20 @@ export class FakeProvider {
     if(this.behavior.generate) throw this.behavior.generate;
     return id;
   }
+  async generateInfographic(book, source, options = {}) {
+    if (!source) throw new Error('Missing source');
+    const id = `infographic-${++this.generations}`;
+    this.calls.push(['generateInfographic', book, source, options]);
+    this.remoteArtifacts.push({
+      artifact_id: id,
+      type: 'infographic',
+      source_ids: [source],
+      status: 'completed',
+      ...options
+    });
+    if (this.behavior.generateInfographic) throw this.behavior.generateInfographic;
+    return id;
+  }
   async download(book,id,path) {
     this.calls.push(['download',book,id]);
     if(this.behavior.download) throw this.behavior.download;
@@ -74,7 +88,9 @@ export class FakeProvider {
   async downloadInfographic(book, id, path) {
     this.calls.push(['downloadInfographic', book, id]);
     if (this.behavior.downloadInfographic) throw this.behavior.downloadInfographic;
-    await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, Buffer.alloc(256, 1));
+    await mkdir(join(path, '..'), { recursive: true });
+    const validPng = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6360000000020001e527defc0000000049454e44ae426082', 'hex');
+    await writeFile(path, validPng);
   }
   async downloadMindMap(book, id, path) {
     this.calls.push(['downloadMindMap', book, id]);

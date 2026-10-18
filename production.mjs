@@ -151,15 +151,27 @@ export function previewProductionPlan({ store, bookId, recipeId = 'default-audio
   };
 }
 
-export function confirmProductionPlan({ store, bookId, recipeId, recipeVersion, blockIds, requestId } = {}) {
+export function confirmProductionPlan({ store, bookId, recipeId, recipeVersion, blockIds, requestId, expectedRevision } = {}) {
   if (!requestId || typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(requestId)) {
     throw new Error('requestId inválido para confirmar plan de producción.');
   }
 
   return store.transaction(() => {
+    const payloadSignature = hashParams({
+      recipeId: recipeId || 'default-audio',
+      recipeVersion: recipeVersion || 1,
+      blockIds: Array.isArray(blockIds) ? blockIds.slice().sort() : null
+    });
+
     // Check if already applied under this requestId
     const existingEvent = store.get("SELECT * FROM production_events WHERE book_id=? AND event='plan_confirmed' AND reason=?", bookId, requestId);
     if (existingEvent) {
+      if (existingEvent.from_state && existingEvent.from_state !== payloadSignature) {
+        const conflictErr = new Error('Conflicto: requestId ya utilizado con parámetros diferentes.');
+        conflictErr.code = 'CONFLICT';
+        conflictErr.status = 409;
+        throw conflictErr;
+      }
       const existingTasks = store.materialTasks(bookId);
       return {
         ok: true,
@@ -204,6 +216,8 @@ export function confirmProductionPlan({ store, bookId, recipeId, recipeVersion, 
     store.recordProductionEvent({
       bookId,
       event: 'plan_confirmed',
+      fromState: payloadSignature,
+      toState: 'planned',
       reason: requestId
     });
 

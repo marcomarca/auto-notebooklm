@@ -51,9 +51,17 @@ export class Queue {
     const pendingJob = this.store.get("SELECT * FROM download_jobs WHERE state='queued' AND next_at <= ? ORDER BY created_at LIMIT 1", now);
     if (pendingJob) return this.runDownloadJob(pendingJob);
 
+    // 0.1 Fast non-audio material task downloads (e.g. infographic)
+    const matDownload = this.store.get("SELECT * FROM material_tasks WHERE is_current=1 AND type != 'audio' AND state='download_pending' AND next_at <= ? ORDER BY created_at LIMIT 1", now);
+    if (matDownload) return this.runMaterialTask(matDownload);
+
     // 1. Fast local download & convert jobs
     const local = all.find(({ block }) => ['download', 'convert'].includes(block.stage) && runnable(block));
     if (local) return this.runBlock(local.book, local.block);
+
+    // 1.1 Non-audio material task polling (e.g. infographic)
+    const matPoll = this.store.get("SELECT * FROM material_tasks WHERE is_current=1 AND type != 'audio' AND state='remote_pending' AND next_at <= ? ORDER BY next_at ASC LIMIT 1", now);
+    if (matPoll) return this.runMaterialTask(matPoll);
 
     // 2. Poll audios in Google's cloud generation whose timer has elapsed
     const polling = all.find(({ block }) => block.stage === 'poll' && runnable(block));
@@ -86,9 +94,16 @@ export class Queue {
     const next = all.find(({ book, block }) => book.remote_id && book.running && book.quota_at <= now && block.stage === 'generate' && !block.baseline && runnable(block));
     if (next) return this.runBlock(next.book, next.block);
 
+    // 8. Dispatch next non-audio material task (e.g. infographic)
+    const matGen = this.store.get("SELECT t.* FROM material_tasks t JOIN books b ON t.book_id=b.id JOIN blocks bl ON t.block_id=bl.id WHERE t.is_current=1 AND t.type != 'audio' AND t.state IN ('planned', 'queued') AND b.running=1 AND bl.source_id IS NOT NULL AND bl.source_id != '' AND t.next_at <= ? ORDER BY t.priority DESC, t.created_at ASC LIMIT 1", now);
+    if (matGen) return this.runMaterialTask(matGen);
+
     for (const b of books.filter(b => b.running)) {
       const blocks = this.store.blocks(b.id);
-      if (blocks.length && blocks.every(x => x.state === 'done')) this.store.update('books', b.id, { running: 0 });
+      const tasks = this.store.materialTasks(b.id, { currentOnly: true });
+      const blocksDone = !blocks.length || blocks.every(x => x.state === 'done');
+      const tasksDone = !tasks.length || tasks.every(t => ['ready', 'canceled', 'failed'].includes(t.state));
+      if (blocksDone && tasksDone) this.store.update('books', b.id, { running: 0 });
     }
   }
   providerFor(book, block) {
@@ -602,5 +617,288 @@ export class Queue {
     if (!book) throw new Error('Libro inexistente.');
     if (book.remote_id) return;
     this.store.update('books', id, { state: book.baseline ? 'creating' : 'pending', attempts: 0, next_at: 0, error: null, error_code: null });
+  }
+  async runMaterialTask(task) {
+    const book = this.store.book(task.book_id);
+    const block = this.store.block(task.block_id);
+    if (!book || !block) return;
+    if (task.canceled_at || task.state === 'canceled') return;
+
+    const controller = new AbortController();
+    this.controllers.set(task.id, controller);
+    let provider = this.providerFor(book, block);
+
+    try {
+      if (task.state === 'download_pending') {
+        const attempts = this.store.materialAttempts(task.id);
+        const lastAttempt = attempts.at(-1);
+        const artifactId = lastAttempt?.artifact_id || task.selected_remote_item_id;
+        if (!artifactId) throw new ProviderError('REJECTED', 'Falta el ID del artefacto para la descarga.');
+
+        const bookRow = this.store.book(book.id) || book;
+        const dir = join(this.exportsDir, exportDirName(bookRow));
+        await mkdir(dir, { recursive: true });
+
+        let outPath = task.output_path;
+        if (!outPath) {
+          const ext = task.type === 'infographic' ? 'png' : (task.type === 'audio' ? 'mp3' : 'dat');
+          const baseName = formatBlockOutputName(block, bookRow.numbering).replace(/\.[^.]+$/, '');
+          outPath = join(dir, `${baseName}.${ext}`);
+        }
+
+        if (task.type === 'infographic') {
+          await provider.downloadInfographic(book.remote_id, artifactId, outPath, { signal: controller.signal });
+        } else if (task.type === 'audio') {
+          await provider.download(book.remote_id, artifactId, outPath, { signal: controller.signal });
+        }
+
+        const st = await stat(outPath).catch(() => null);
+        if (!st || st.size === 0) {
+          throw new ProviderError('TEMPORARY', 'El archivo descargado está vacío.');
+        }
+
+        this.store.updateMaterialTask(task.id, {
+          state: 'ready',
+          output_path: outPath,
+          error: null,
+          error_code: null
+        });
+
+        if (lastAttempt) {
+          this.store.updateMaterialAttempt(lastAttempt.id, {
+            state: 'resolved',
+            resolved_at: this.now()
+          });
+        }
+      } else if (task.state === 'remote_pending') {
+        const attempts = this.store.materialAttempts(task.id);
+        const lastAttempt = attempts.at(-1);
+        const artifactId = lastAttempt?.artifact_id || task.selected_remote_item_id;
+        if (!artifactId) throw new ProviderError('REJECTED', 'Falta el ID del artefacto.');
+
+        const rows = await provider.artifacts(book.remote_id, artifactId);
+        const remoteItem = rows.find(a => (a.artifact_id || a.id) === artifactId);
+        if (!remoteItem) throw new ProviderError('TEMPORARY', 'El artefacto todavía no aparece en NotebookLM.');
+
+        if (['failed', 'error'].includes(remoteItem.status)) {
+          throw new ProviderError('ARTIFACT_FAILED', redact(remoteItem.error_reason || 'NotebookLM no pudo generar el artefacto.'));
+        }
+
+        if (['completed', 'ready'].includes(remoteItem.status)) {
+          const bookRow = this.store.book(book.id) || book;
+          const dir = join(this.exportsDir, exportDirName(bookRow));
+          const ext = task.type === 'infographic' ? 'png' : (task.type === 'audio' ? 'mp3' : 'dat');
+          const baseName = formatBlockOutputName(block, bookRow.numbering).replace(/\.[^.]+$/, '');
+          const outPath = join(dir, `${baseName}.${ext}`);
+
+          this.store.updateMaterialTask(task.id, {
+            state: 'download_pending',
+            output_path: outPath,
+            next_at: 0,
+            attempts: 0,
+            error: null,
+            error_code: null
+          });
+        } else {
+          const nextAt = this.now() + 15000;
+          this.store.updateMaterialTask(task.id, {
+            state: 'remote_pending',
+            next_at: nextAt,
+            error: null,
+            error_code: null
+          });
+        }
+      } else if (['planned', 'queued'].includes(task.state)) {
+        if (!block.source_id) return;
+
+        // 1. Check for existing single-source artifact in notebook
+        const remoteArtifacts = await provider.artifacts(book.remote_id);
+        const existingArtifact = remoteArtifacts.find(a =>
+          a.type === task.type &&
+          Array.isArray(a.source_ids) &&
+          a.source_ids.length === 1 &&
+          a.source_ids[0] === block.source_id &&
+          ['completed', 'ready'].includes(a.status)
+        );
+
+        if (existingArtifact) {
+          const artId = existingArtifact.artifact_id || existingArtifact.id;
+          const bookRow = this.store.book(book.id) || book;
+          const dir = join(this.exportsDir, exportDirName(bookRow));
+          const ext = task.type === 'infographic' ? 'png' : (task.type === 'audio' ? 'mp3' : 'dat');
+          const baseName = formatBlockOutputName(block, bookRow.numbering).replace(/\.[^.]+$/, '');
+          const outPath = join(dir, `${baseName}.${ext}`);
+
+          const attemptNumber = (this.store.materialAttempts(task.id).length || 0) + 1;
+          const attempt = this.store.createMaterialAttempt({
+            taskId: task.id,
+            attemptNumber,
+            profile: provider.profile,
+            remoteNotebookId: book.remote_id,
+            sourceIds: [block.source_id],
+            state: 'accepted',
+            artifactId: artId
+          });
+
+          this.store.updateMaterialTask(task.id, {
+            state: 'download_pending',
+            selected_attempt_id: attempt.id,
+            selected_remote_item_id: null,
+            output_path: outPath,
+            next_at: 0,
+            error: null,
+            error_code: null
+          });
+          return;
+        }
+
+        // 2. Check cancellation
+        const currentTask = this.store.materialTask(task.id);
+        if (currentTask.canceled_at || currentTask.state === 'canceled') return;
+
+        // 3. Multi-account candidate check
+        if (this.accounts) {
+          const candidate = await this.accounts.candidate(book, block.source_id);
+          if (!candidate.provider) {
+            this.store.updateMaterialTask(task.id, {
+              state: 'waiting_quota',
+              next_at: candidate.retryAt,
+              error: 'Esperando cuenta con cuota disponible.',
+              error_code: 'QUOTA'
+            });
+            return;
+          }
+          provider = candidate.provider;
+        }
+
+        const before = ids(await provider.artifacts(book.remote_id));
+
+        const attemptNumber = (this.store.materialAttempts(task.id).length || 0) + 1;
+        const attempt = this.store.createMaterialAttempt({
+          taskId: task.id,
+          attemptNumber,
+          profile: provider.profile,
+          remoteNotebookId: book.remote_id,
+          sourceIds: [block.source_id],
+          baseline: before,
+          state: 'submitting'
+        });
+
+        this.store.updateMaterialTask(task.id, {
+          state: 'submitting',
+          selected_attempt_id: attempt.id
+        });
+
+        const params = task.params_json ? JSON.parse(task.params_json) : {};
+        let artifactId;
+        if (task.type === 'infographic') {
+          artifactId = await provider.generateInfographic(book.remote_id, block.source_id, params);
+        } else if (task.type === 'audio') {
+          artifactId = await provider.generate(book.remote_id, block.source_id, params);
+        } else {
+          throw new ProviderError('REJECTED', `Tipo de material no soportado: ${task.type}`);
+        }
+
+        const afterGenTask = this.store.materialTask(task.id);
+        if (afterGenTask.canceled_at || afterGenTask.state === 'canceled') {
+          this.store.updateMaterialAttempt(attempt.id, { artifact_id: artifactId, state: 'accepted' });
+          this.store.updateMaterialTask(task.id, {
+            state: 'canceled',
+            error: 'Cancelado localmente. La generación remota puede haber continuado en Google.',
+            error_code: 'CANCELED'
+          });
+          return;
+        }
+
+        this.store.updateMaterialAttempt(attempt.id, { artifact_id: artifactId, state: 'accepted' });
+        this.store.updateMaterialTask(task.id, {
+          state: 'remote_pending',
+          selected_attempt_id: attempt.id,
+          next_at: this.now() + 15000,
+          error: null,
+          error_code: null
+        });
+      }
+    } catch (error) {
+      this.handleMaterialTaskError(task, error, provider);
+    } finally {
+      this.controllers.delete(task.id);
+    }
+  }
+  handleMaterialTaskError(task, error, provider) {
+    const code = error.code || 'PROVIDER';
+    const attempts = (task.retry_count || 0) + 1;
+    let state = 'failed';
+    let nextAt = 0;
+
+    if (task.state === 'download_pending') {
+      if (attempts <= 3) {
+        state = 'download_pending';
+        nextAt = this.now() + [15000, 30000, 60000][attempts - 1];
+      } else {
+        state = 'review_required';
+      }
+    } else if (code === 'AUTH_REQUIRED') {
+      state = 'waiting_auth';
+    } else if (code === 'QUOTA') {
+      state = 'waiting_quota';
+      nextAt = this.now() + 30 * 60 * 1000;
+    } else if (code === 'REVIEW' || error.uncertain) {
+      state = 'review_required';
+    } else if (code === 'TEMPORARY') {
+      if (attempts <= 3) {
+        state = 'retry_wait';
+        nextAt = this.now() + [15000, 30000, 60000][attempts - 1];
+      } else {
+        state = 'review_required';
+      }
+    } else if (code === 'ARTIFACT_FAILED') {
+      state = 'failed';
+    }
+
+    this.store.updateMaterialTask(task.id, {
+      state,
+      retry_count: attempts,
+      next_at: nextAt,
+      error: redact(error.message).slice(0, 1200),
+      error_code: code
+    });
+
+    if (task.selected_attempt_id) {
+      this.store.updateMaterialAttempt(task.selected_attempt_id, {
+        state: 'failed',
+        error: redact(error.message).slice(0, 1200),
+        error_code: code
+      });
+    }
+
+    if (code === 'AUTH_REQUIRED') {
+      provider.health = {
+        ...provider.health,
+        ready: false,
+        auth: false,
+        error: `Sesión expirada. Ejecuta nlm login -p ${provider.profile} y comprueba la cuenta.`,
+        errorCode: code
+      };
+    }
+  }
+  cancelMaterialTask(id, reason = 'Cancelado por el usuario') {
+    const task = this.store.materialTask(id);
+    if (!task) throw new Error('Tarea de material inexistente.');
+    if (task.state === 'ready') return { ok: true, alreadyDone: true, task };
+    const controller = this.controllers.get(id);
+    if (controller) {
+      controller.abort();
+      this.controllers.delete(id);
+    }
+    const alreadyRemote = ['submitting', 'remote_pending', 'download_pending'].includes(task.state);
+    const msg = alreadyRemote
+      ? 'Cancelado localmente. La generación remota puede haber continuado en Google.'
+      : (reason || 'Cancelado por el usuario');
+    const updated = this.store.cancelMaterialTask(id, msg);
+    return { ok: true, alreadyDone: false, alreadyRemote, task: updated };
+  }
+  retryMaterialTask(id) {
+    return this.store.retryMaterialTask(id);
   }
 }
