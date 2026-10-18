@@ -206,6 +206,7 @@ export class Store {
             original_path TEXT,
             output_path TEXT,
             created_at INTEGER NOT NULL,
+            started_at INTEGER,
             completed_at INTEGER
           );
           CREATE INDEX IF NOT EXISTS idx_download_jobs_state ON download_jobs(state);
@@ -499,6 +500,32 @@ export class Store {
   }
   remoteOperations(bookId) {
     return this.all('SELECT * FROM remote_operations WHERE book_id=? ORDER BY created_at DESC', bookId);
+  }
+  createDownloadJob({ bookId, remoteItemId, format, profile, outputPath, requestId }) {
+    const id = randomUUID();
+    const reqId = requestId || `dl-${randomUUID().slice(0, 20)}`;
+    const existing = this.get('SELECT * FROM download_jobs WHERE remote_item_id=? AND format=?', remoteItemId, format);
+    if (existing) {
+      if (['error', 'canceled'].includes(existing.state)) {
+        this.update('download_jobs', existing.id, { state: 'queued', attempts: 0, next_at: 0, error: null, error_code: null });
+      }
+      return this.downloadJob(existing.id);
+    }
+    this.db.prepare(`
+      INSERT INTO download_jobs(id, book_id, remote_item_id, format, profile, state, output_path, request_id, created_at)
+      VALUES(?,?,?,?,?,?,?,?,?)
+    `).run(id, bookId, remoteItemId, format, profile, 'queued', outputPath, reqId, Date.now());
+    return this.downloadJob(id);
+  }
+  downloadJob(id) {
+    return this.get('SELECT * FROM download_jobs WHERE id=?', id);
+  }
+  downloadJobs(bookId) {
+    if (bookId) return this.all('SELECT * FROM download_jobs WHERE book_id=? ORDER BY created_at DESC', bookId);
+    return this.all('SELECT * FROM download_jobs ORDER BY created_at DESC');
+  }
+  findDownloadJob(remoteItemId, format) {
+    return this.get('SELECT * FROM download_jobs WHERE remote_item_id=? AND format=?', remoteItemId, format);
   }
   close() { this.db.close(); }
 }

@@ -55,6 +55,46 @@ export class FakeProvider {
     if (idx !== -1) this.remoteArtifacts.splice(idx, 1);
     return { ok: true };
   }
+  async downloadVideo(book, id, path) {
+    this.calls.push(['downloadVideo', book, id]);
+    if (this.behavior.downloadVideo) throw this.behavior.downloadVideo;
+    await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, Buffer.alloc(256, 1));
+  }
+  async downloadReport(book, id, path) {
+    this.calls.push(['downloadReport', book, id]);
+    if (this.behavior.downloadReport) throw this.behavior.downloadReport;
+    await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, '# Report\nContent');
+  }
+  async downloadSlideDeck(book, id, path, { format } = {}) {
+    this.calls.push(['downloadSlideDeck', book, id, format]);
+    if (this.behavior.downloadSlideDeck) throw this.behavior.downloadSlideDeck;
+    await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, Buffer.alloc(256, 1));
+  }
+  async downloadInfographic(book, id, path) {
+    this.calls.push(['downloadInfographic', book, id]);
+    if (this.behavior.downloadInfographic) throw this.behavior.downloadInfographic;
+    await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, Buffer.alloc(256, 1));
+  }
+  async downloadMindMap(book, id, path) {
+    this.calls.push(['downloadMindMap', book, id]);
+    if (this.behavior.downloadMindMap) throw this.behavior.downloadMindMap;
+    await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, JSON.stringify({ mindmap: true }));
+  }
+  async downloadQuiz(book, id, path, { format } = {}) {
+    this.calls.push(['downloadQuiz', book, id, format]);
+    if (this.behavior.downloadQuiz) throw this.behavior.downloadQuiz;
+    await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, format === 'markdown' ? '# Quiz' : JSON.stringify({ quiz: true }));
+  }
+  async downloadFlashcards(book, id, path, { format } = {}) {
+    this.calls.push(['downloadFlashcards', book, id, format]);
+    if (this.behavior.downloadFlashcards) throw this.behavior.downloadFlashcards;
+    await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, format === 'markdown' ? '# Cards' : JSON.stringify({ cards: true }));
+  }
+  async downloadDataTable(book, id, path) {
+    this.calls.push(['downloadDataTable', book, id]);
+    if (this.behavior.downloadDataTable) throw this.behavior.downloadDataTable;
+    await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, 'col1,col2\n1,2');
+  }
 }
 export async function fixture(t) {
   const dir=await mkdtemp(join(tmpdir(),'auto-nlm-test-'));

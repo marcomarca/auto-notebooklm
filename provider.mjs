@@ -293,5 +293,112 @@ export class Provider {
       throw e;
     }
   }
+  async downloadVideo(bookId, artifactId, destination, { signal } = {}) {
+    await mkdir(dirname(destination), { recursive: true });
+    const tmp = `${destination}.part.mp4`;
+    await rm(tmp, { force: true });
+    try {
+      await this.cli(['download', 'video', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--no-progress', '-p', this.profile], { parse: false, timeout: 660000, signal });
+      if ((await stat(tmp)).size === 0) throw new ProviderError('TEMPORARY', 'El vídeo descargado está vacío.');
+      await rename(tmp, destination);
+    } catch (e) {
+      await rm(tmp, { force: true });
+      throw e;
+    }
+  }
+  async downloadReport(bookId, artifactId, destination, { signal } = {}) {
+    await mkdir(dirname(destination), { recursive: true });
+    const tmp = `${destination}.part.md`;
+    await rm(tmp, { force: true });
+    try {
+      await this.cli(['download', 'report', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '-p', this.profile], { parse: false, timeout: 120000, signal });
+      if ((await stat(tmp)).size === 0) throw new ProviderError('TEMPORARY', 'El informe descargado está vacío.');
+      await rename(tmp, destination);
+    } catch (e) {
+      await rm(tmp, { force: true });
+      throw e;
+    }
+  }
+  async downloadSlideDeck(bookId, artifactId, destination, { format = 'pdf', signal } = {}) {
+    await mkdir(dirname(destination), { recursive: true });
+    const ext = format === 'pptx' ? 'pptx' : 'pdf';
+    const tmp = `${destination}.part.${ext}`;
+    await rm(tmp, { force: true });
+    try {
+      await this.cli(['download', 'slide-deck', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--format', ext, '--no-progress', '-p', this.profile], { parse: false, timeout: 180000, signal });
+      if ((await stat(tmp)).size === 0) throw new ProviderError('TEMPORARY', 'Las diapositivas descargadas están vacías.');
+      await rename(tmp, destination);
+    } catch (e) {
+      await rm(tmp, { force: true });
+      throw e;
+    }
+  }
+  async downloadInfographic(bookId, artifactId, destination, { signal } = {}) {
+    await mkdir(dirname(destination), { recursive: true });
+    const tmp = `${destination}.part.png`;
+    await rm(tmp, { force: true });
+    try {
+      await this.cli(['download', 'infographic', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--no-progress', '-p', this.profile], { parse: false, timeout: 180000, signal });
+      if ((await stat(tmp)).size === 0) throw new ProviderError('TEMPORARY', 'La infografía descargada está vacía.');
+      await rename(tmp, destination);
+    } catch (e) {
+      await rm(tmp, { force: true });
+      throw e;
+    }
+  }
+  async downloadMindMap(bookId, artifactId, destination, { signal } = {}) {
+    await mkdir(dirname(destination), { recursive: true });
+    const tmp = `${destination}.part.json`;
+    await rm(tmp, { force: true });
+    try {
+      await this.cli(['download', 'mind-map', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '-p', this.profile], { parse: false, timeout: 120000, signal });
+      if ((await stat(tmp)).size === 0) throw new ProviderError('TEMPORARY', 'El mapa mental descargado está vacío.');
+      await rename(tmp, destination);
+    } catch (e) {
+      await rm(tmp, { force: true });
+      throw e;
+    }
+  }
+  async downloadQuiz(bookId, artifactId, destination, { format = 'json', signal } = {}) {
+    await mkdir(dirname(destination), { recursive: true });
+    const ext = format === 'markdown' ? 'md' : 'json';
+    const tmp = `${destination}.part.${ext}`;
+    await rm(tmp, { force: true });
+    try {
+      await this.cli(['download', 'quiz', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--format', format, '-p', this.profile], { parse: false, timeout: 120000, signal });
+      if ((await stat(tmp)).size === 0) throw new ProviderError('TEMPORARY', 'El cuestionario descargado está vacío.');
+      await rename(tmp, destination);
+    } catch (e) {
+      await rm(tmp, { force: true });
+      throw e;
+    }
+  }
+  async downloadFlashcards(bookId, artifactId, destination, { format = 'json', signal } = {}) {
+    await mkdir(dirname(destination), { recursive: true });
+    const ext = format === 'markdown' ? 'md' : 'json';
+    const tmp = `${destination}.part.${ext}`;
+    await rm(tmp, { force: true });
+    try {
+      await this.cli(['download', 'flashcards', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--format', format, '-p', this.profile], { parse: false, timeout: 120000, signal });
+      if ((await stat(tmp)).size === 0) throw new ProviderError('TEMPORARY', 'Las tarjetas descargadas están vacías.');
+      await rename(tmp, destination);
+    } catch (e) {
+      await rm(tmp, { force: true });
+      throw e;
+    }
+  }
+  async downloadDataTable(bookId, artifactId, destination, { signal } = {}) {
+    await mkdir(dirname(destination), { recursive: true });
+    const tmp = `${destination}.part.csv`;
+    await rm(tmp, { force: true });
+    try {
+      await this.cli(['download', 'data-table', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '-p', this.profile], { parse: false, timeout: 120000, signal });
+      if ((await stat(tmp)).size === 0) throw new ProviderError('TEMPORARY', 'La tabla descargada está vacía.');
+      await rename(tmp, destination);
+    } catch (e) {
+      await rm(tmp, { force: true });
+      throw e;
+    }
+  }
   close() { return this.runner.close(); }
 }

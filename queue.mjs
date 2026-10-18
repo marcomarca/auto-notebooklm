@@ -47,6 +47,10 @@ export class Queue {
     const all = books.flatMap(book => this.store.blocks(book.id).map(block => ({ book, block })));
     const runnable = b => !['done', 'review', 'auth', 'canceled'].includes(b.state) && !b.canceled_at && b.next_at <= now && !(b.state === 'error' && b.attempts > 3);
 
+    // 0. Non-audio download jobs from remote items
+    const pendingJob = this.store.get("SELECT * FROM download_jobs WHERE state='queued' AND next_at <= ? ORDER BY created_at LIMIT 1", now);
+    if (pendingJob) return this.runDownloadJob(pendingJob);
+
     // 1. Fast local download & convert jobs
     const local = all.find(({ block }) => ['download', 'convert'].includes(block.stage) && runnable(block));
     if (local) return this.runBlock(local.book, local.block);
@@ -320,6 +324,129 @@ export class Queue {
       alreadyDone: false,
       block: this.store.block(id)
     };
+  }
+  async runDownloadJob(job) {
+    const initial = this.store.downloadJob(job.id);
+    if (!initial || initial.state === 'canceled') return;
+    const controller = new AbortController();
+    this.controllers.set(job.id, controller);
+
+    const book = this.store.book(job.book_id);
+    if (!book || !book.remote_id) {
+      this.store.update('download_jobs', job.id, {
+        state: 'error',
+        error: 'El cuaderno asociado ya no existe o no está vinculado.',
+        error_code: 'NOT_FOUND'
+      });
+      this.controllers.delete(job.id);
+      return;
+    }
+
+    const item = this.store.get('SELECT * FROM remote_items WHERE id=?', job.remote_item_id);
+    if (!item) {
+      this.store.update('download_jobs', job.id, {
+        state: 'error',
+        error: 'El elemento remoto no existe en el catálogo local.',
+        error_code: 'NOT_FOUND'
+      });
+      this.controllers.delete(job.id);
+      return;
+    }
+
+    const provider = this.providerFor(book, { generation_profile: job.profile });
+    this.store.update('download_jobs', job.id, {
+      state: 'downloading',
+      attempts: (job.attempts || 0) + 1,
+      started_at: this.now()
+    });
+
+    try {
+      const type = item.type;
+      const fmt = job.format;
+      const targetPath = job.output_path;
+      const signal = controller.signal;
+
+      if (type === 'video') {
+        await provider.downloadVideo(book.remote_id, item.remote_id, targetPath, { signal });
+      } else if (type === 'report') {
+        await provider.downloadReport(book.remote_id, item.remote_id, targetPath, { signal });
+      } else if (type === 'slide_deck') {
+        await provider.downloadSlideDeck(book.remote_id, item.remote_id, targetPath, { format: fmt, signal });
+      } else if (type === 'infographic') {
+        await provider.downloadInfographic(book.remote_id, item.remote_id, targetPath, { signal });
+      } else if (type === 'mind_map') {
+        await provider.downloadMindMap(book.remote_id, item.remote_id, targetPath, { signal });
+      } else if (type === 'quiz') {
+        await provider.downloadQuiz(book.remote_id, item.remote_id, targetPath, { format: fmt, signal });
+      } else if (type === 'flashcards') {
+        await provider.downloadFlashcards(book.remote_id, item.remote_id, targetPath, { format: fmt, signal });
+      } else if (type === 'data_table') {
+        await provider.downloadDataTable(book.remote_id, item.remote_id, targetPath, { signal });
+      } else if (type === 'audio') {
+        await provider.download(book.remote_id, item.remote_id, targetPath, { signal });
+      } else {
+        throw new ProviderError('UNSUPPORTED_TYPE', `Tipo de contenido sin adaptador de descarga conocido: ${type}`);
+      }
+
+      const st = await stat(targetPath).catch(() => null);
+      if (!st || st.size === 0) {
+        throw new ProviderError('TEMPORARY', 'El archivo descargado no existe o está vacío.');
+      }
+
+      this.store.update('download_jobs', job.id, {
+        state: 'done',
+        completed_at: this.now(),
+        error: null,
+        error_code: null
+      });
+    } catch (error) {
+      if (error.code === 'ABORTED' || controller.signal.aborted) {
+        this.store.update('download_jobs', job.id, {
+          state: 'canceled',
+          error: 'Descarga cancelada localmente.',
+          error_code: 'CANCELED'
+        });
+        return;
+      }
+      const attempts = (job.attempts || 0) + 1;
+      const code = error.code || 'DOWNLOAD_ERROR';
+      if (code === 'TEMPORARY' && attempts <= 3) {
+        const nextAt = this.now() + [15000, 30000, 60000][attempts - 1];
+        this.store.update('download_jobs', job.id, {
+          state: 'queued',
+          next_at: nextAt,
+          attempts,
+          error: redact(error.message).slice(0, 1200),
+          error_code: code
+        });
+      } else {
+        this.store.update('download_jobs', job.id, {
+          state: 'error',
+          attempts,
+          error: redact(error.message).slice(0, 1200),
+          error_code: code
+        });
+      }
+    } finally {
+      this.controllers.delete(job.id);
+    }
+  }
+  cancelDownloadJob(id, reason = 'Cancelado por el usuario') {
+    const job = this.store.downloadJob(id);
+    if (!job) throw new Error('Trabajo de descarga inexistente.');
+    if (job.state === 'done') return { ok: true, alreadyDone: true, job };
+    const now = this.now();
+    this.store.update('download_jobs', job.id, {
+      state: 'canceled',
+      error: 'Descarga cancelada localmente.',
+      error_code: 'CANCELED'
+    });
+    const controller = this.controllers.get(id);
+    if (controller) {
+      controller.abort();
+      this.controllers.delete(id);
+    }
+    return { ok: true, alreadyDone: false, job: this.store.downloadJob(id) };
   }
   defer(book, block, retryAt, message = 'Cuota agotada. Generar más tarde activado: los pendientes continuarán automáticamente cuando se restablezca la cuota.') {
     this.store.update('books', book.id, { quota_at: retryAt, quota_error: message });

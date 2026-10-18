@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
-import { join, dirname, extname, resolve } from 'node:path';
+import { join, dirname, extname, resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store, title, safeName, exportDirName } from './store.mjs';
 import { Provider, redact } from './provider.mjs';
@@ -32,6 +32,30 @@ const root = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(root, 'public');
 const maxFile = 200 * 1024 * 1024;
 const natural = new Intl.Collator('es', { numeric: true, sensitivity: 'base' });
+
+const SUPPORTED_NON_AUDIO = {
+  video: { ext: () => 'mp4', defaultFormat: 'mp4' },
+  report: { ext: () => 'md', defaultFormat: 'markdown' },
+  slide_deck: { ext: (f) => f === 'pptx' ? 'pptx' : 'pdf', defaultFormat: 'pdf' },
+  infographic: { ext: () => 'png', defaultFormat: 'png' },
+  mind_map: { ext: () => 'json', defaultFormat: 'json' },
+  quiz: { ext: (f) => f === 'markdown' ? 'md' : 'json', defaultFormat: 'json' },
+  flashcards: { ext: (f) => f === 'markdown' ? 'md' : 'json', defaultFormat: 'json' },
+  data_table: { ext: () => 'csv', defaultFormat: 'csv' }
+};
+
+const MIME_TYPES = {
+  mp4: 'video/mp4',
+  m4a: 'audio/mp4',
+  mp3: 'audio/mpeg',
+  pdf: 'application/pdf',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  png: 'image/png',
+  json: 'application/json; charset=utf-8',
+  md: 'text/markdown; charset=utf-8',
+  csv: 'text/csv; charset=utf-8',
+  txt: 'text/plain; charset=utf-8'
+};
 
 async function acquireLock(dataDir) {
   const file = join(dataDir, '.running');
@@ -426,31 +450,61 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
               continue;
             }
 
-            let block = store.get('SELECT * FROM blocks WHERE book_id=? AND artifact_id=?', book.id, catItem.remote_id);
-            if (block && block.state === 'done') {
-              existing.push({ id: itemId, blockId: block.id, state: 'done', path: block.output_path });
-              continue;
-            }
-
-            if (!block) {
-              block = store.importRemoteBlock(book.id, {
-                title: catItem.title,
-                artifactId: catItem.remote_id,
-                sourceId: catItem.source_ids_json ? JSON.parse(catItem.source_ids_json)?.[0] : null,
-                profile: book.profile,
-                status: 'completed',
-                originalPath: join(dataDir, 'audio', `pending.m4a`),
-                outputPath: null
-              });
-              store.update('blocks', block.id, {
-                original_path: join(dataDir, 'audio', `${block.id}.m4a`)
-              });
-              accepted.push({ id: itemId, blockId: block.id, state: 'queued' });
-            } else {
-              if (block.state === 'error') {
-                store.update('blocks', block.id, { stage: 'download', state: 'download', attempts: 0, next_at: 0, error: null, error_code: null });
+            if (catItem.type === 'audio') {
+              let block = store.get('SELECT * FROM blocks WHERE book_id=? AND artifact_id=?', book.id, catItem.remote_id);
+              if (block && block.state === 'done') {
+                existing.push({ id: itemId, blockId: block.id, state: 'done', path: block.output_path });
+                continue;
               }
-              accepted.push({ id: itemId, blockId: block.id, state: block.state });
+
+              if (!block) {
+                block = store.importRemoteBlock(book.id, {
+                  title: catItem.title,
+                  artifactId: catItem.remote_id,
+                  sourceId: catItem.source_ids_json ? JSON.parse(catItem.source_ids_json)?.[0] : null,
+                  profile: book.profile,
+                  status: 'completed',
+                  originalPath: join(dataDir, 'audio', `pending.m4a`),
+                  outputPath: null
+                });
+                store.update('blocks', block.id, {
+                  original_path: join(dataDir, 'audio', `${block.id}.m4a`)
+                });
+                accepted.push({ id: itemId, blockId: block.id, state: 'queued' });
+              } else {
+                if (block.state === 'error') {
+                  store.update('blocks', block.id, { stage: 'download', state: 'download', attempts: 0, next_at: 0, error: null, error_code: null });
+                }
+                accepted.push({ id: itemId, blockId: block.id, state: block.state });
+              }
+            } else if (catItem.type && SUPPORTED_NON_AUDIO[catItem.type]) {
+              const spec = SUPPORTED_NON_AUDIO[catItem.type];
+              const fmt = (typeof raw === 'object' && raw.format) ? raw.format : spec.defaultFormat;
+              const ext = spec.ext(fmt);
+              const clean = safeName(catItem.title);
+              const fileName = `${clean}-${catItem.remote_id.slice(0, 8)}.${ext}`;
+              const outputPath = join(dir, fileName);
+
+              const existingJob = store.findDownloadJob(catItem.id, fmt);
+              if (existingJob && existingJob.state === 'done') {
+                const fsStat = await import('node:fs/promises').then(fs => fs.stat(existingJob.output_path)).catch(() => null);
+                if (fsStat && fsStat.size > 0) {
+                  existing.push({ id: itemId, jobId: existingJob.id, state: 'done', path: existingJob.output_path });
+                  continue;
+                }
+              }
+
+              const job = store.createDownloadJob({
+                bookId: book.id,
+                remoteItemId: catItem.id,
+                format: fmt,
+                profile: book.profile,
+                outputPath,
+                requestId: payload?.requestId
+              });
+              accepted.push({ id: itemId, jobId: job.id, state: job.state, path: job.output_path });
+            } else {
+              rejected.push({ id: itemId, reason: `Tipo de contenido sin adaptador de descarga conocido: ${catItem.type || 'desconocido'}` });
             }
           }
           store.updateBlockOutputPaths(book.id, exportsDir, { renameFiles: false });
@@ -610,16 +664,88 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
         }
         sql += ' ORDER BY created_at DESC';
         const rows = store.all(sql, ...params);
-        return send(res, 200, rows.map(b => ({
+        const blockItems = rows.map(b => ({
           id: b.id,
+          blockId: b.id,
           bookId: b.book_id,
           artifactId: b.artifact_id,
           title: b.title,
+          type: 'audio',
           stage: b.stage,
           state: b.state,
           error: b.error,
           outputPath: b.output_path
-        })));
+        }));
+
+        let djSql = 'SELECT dj.*, ri.title, ri.type as item_type, ri.remote_id as remote_item_remote_id FROM download_jobs dj JOIN remote_items ri ON dj.remote_item_id = ri.id';
+        const djParams = [];
+        if (bookId) {
+          djSql += ' WHERE dj.book_id=?';
+          djParams.push(bookId);
+        }
+        djSql += ' ORDER BY dj.created_at DESC';
+        const djRows = store.all(djSql, ...djParams);
+        const jobItems = djRows.map(dj => ({
+          id: dj.id,
+          jobId: dj.id,
+          bookId: dj.book_id,
+          artifactId: dj.remote_item_remote_id,
+          title: dj.title,
+          type: dj.item_type,
+          format: dj.format,
+          stage: dj.state,
+          state: dj.state,
+          error: dj.error,
+          outputPath: dj.output_path
+        }));
+
+        return send(res, 200, [...blockItems, ...jobItems]);
+      }
+      if (parts[0] === 'api' && parts[1] === 'downloads' && parts[2]) {
+        const id = parts[2];
+        if (parts[3] === 'file' && ['GET', 'HEAD'].includes(req.method)) {
+          const job = store.downloadJob(id);
+          const block = !job ? store.block(id) : null;
+          const item = job || block;
+          if (!item) return send(res, 404, { error: 'Descarga inexistente.' });
+          if (item.state !== 'done') return send(res, 400, { error: 'La descarga no ha finalizado.' });
+          const filePath = item.output_path;
+          if (!filePath) return send(res, 404, { error: 'Archivo no encontrado.' });
+          const fsStat = await import('node:fs/promises').then(fs => fs.stat(filePath)).catch(() => null);
+          if (!fsStat || fsStat.size === 0) return send(res, 404, { error: 'El archivo en disco no existe o está vacío.' });
+
+          const size = fsStat.size;
+          let start = 0, end = size - 1, status = 200;
+          if (req.headers.range) {
+            const match = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
+            if (!match || (!match[1] && !match[2])) { res.writeHead(416, { 'Content-Range': `bytes */${size}` }); return res.end(); }
+            if (match[1]) { start = Number(match[1]); if (match[2]) end = Math.min(Number(match[2]), end); }
+            else start = Math.max(0, size - Number(match[2]));
+            if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= size) { res.writeHead(416, { 'Content-Range': `bytes */${size}` }); return res.end(); }
+            status = 206;
+          }
+          const ext = extname(filePath).slice(1).toLowerCase();
+          const mime = MIME_TYPES[ext] || 'application/octet-stream';
+          const name = basename(filePath);
+          const encodedName = encodeURIComponent(name).replace(/['()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+          res.writeHead(status, {
+            'Content-Type': mime,
+            'Content-Length': end - start + 1,
+            'Accept-Ranges': 'bytes',
+            'Content-Disposition': `${url.searchParams.has('download') ? 'attachment' : 'inline'}; filename="${name}"; filename*=UTF-8''${encodedName}`,
+            ...(status === 206 ? { 'Content-Range': `bytes ${start}-${end}/${size}` } : {})
+          });
+          if (req.method === 'HEAD') return res.end();
+          await pipeline(createReadStream(filePath, { start, end }), res);
+          return;
+        }
+        if (parts[3] === 'cancel' && req.method === 'POST') {
+          const job = store.downloadJob(id);
+          if (job) return send(res, 200, queue.cancelDownloadJob(job.id));
+          const block = store.block(id);
+          if (block) return send(res, 200, queue.cancelBlock(block.id));
+          return send(res, 404, { error: 'Trabajo de descarga no encontrado.' });
+        }
       }
       if (req.method === 'POST' && url.pathname === '/api/exports/open') {
         const dir = resolve(exportsDir);
