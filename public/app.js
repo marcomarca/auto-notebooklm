@@ -15,17 +15,13 @@ const materialLabels = {
   failed: 'Fallido',
   canceled: 'Cancelado'
 };
-const editorialLabels = {
-  unreviewed: 'Sin revisar',
-  approved: 'Aprobado',
-  rejected: 'Rechazado'
-};
 let token, books = [], selected = localStorage.getItem('selected-book'), uploading = false, lastRender = '', refreshing = false;
 let createRequest = crypto.randomUUID();
 let accountData = { accounts: [] }, accountStamp = '', backupStamp = '', savingBackups = false;
 let viewingExplorer = false, remoteBooks = [], selectedRemoteId = null, remoteDetail = null, selectedArtifacts = new Set(), explorerProfile = null, explorerSeq = 0;
 let currentCatalog = null, selectedCatalogSources = new Set(), selectedCatalogArtifacts = new Set(), activeCatalogTab = 'artifacts', pendingDeleteTarget = null;
 let recipes = [], activeViewTab = 'matrix', currentMatrix = null, currentPlanPreview = null;
+let matrixRequestSeq = 0, matrixPage = 1, planRequestId = null;
 let librarySearchQuery = '', libraryPage = 1, libraryTotal = 0, searchDebounce = null;
 const date = t => new Intl.DateTimeFormat('es-BO', { dateStyle:'medium', timeStyle:'short', timeZone:'America/La_Paz' }).format(t);
 
@@ -99,6 +95,7 @@ function renderAccounts() {
   const stamp = JSON.stringify(accountData);
   if (stamp === accountStamp) return;
   accountStamp = stamp;
+  renderQuotaPreview();
   const cards = accountData.accounts.map(a => {
     const card = el('div', { class: 'account-card' });
     const h = a.health, windows = h.usage?.windows || [];
@@ -147,6 +144,30 @@ function renderAccounts() {
     }));
   }
 }
+function renderQuotaPreview() {
+  const panel = $('quota-preview');
+  if (!panel) return;
+  const accounts = accountData.accounts || [];
+  panel.hidden = !accounts.length;
+  $('quota-preview-accounts').replaceChildren(...accounts.map(account => {
+    const windows = account.health?.usage?.windows || [];
+    const known = windows.length > 0 && windows.every(w => Number.isFinite(w.percent_remaining));
+    const limited = account.errorCode === 'QUOTA';
+    const remaining = known && !limited ? Math.max(0, Math.min(100, ...windows.map(w => w.percent_remaining))) : null;
+    const value = limited ? 'En espera' : remaining === null ? 'Sin datos' : `${new Intl.NumberFormat('es-BO', { maximumFractionDigits: 1 }).format(remaining)}%`;
+    const level = limited || remaining !== null && remaining < 20 ? 'low' : remaining === null ? 'unknown' : remaining < 50 ? 'medium' : 'high';
+    const details = [account.id, account.email, !account.enabled ? 'Deshabilitada para la cola' : null,
+      ...windows.map(w => `${w.window || 'Ventana'}: ${Number.isFinite(w.percent_remaining) ? `${w.percent_remaining}%` : 'sin datos'}${w.resets_at && Number.isFinite(Date.parse(w.resets_at)) ? ` · Se restablece: ${date(Date.parse(w.resets_at))}` : ''}`)
+    ].filter(Boolean).join('\n');
+    const row = el('div', { class: `quota-preview-row ${level}`, title: details, tabIndex: 0 });
+    const bar = el('div', { class: 'quota-preview-track', role: 'progressbar', 'aria-label': `Cuota disponible de ${account.id}`,
+      'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuetext': value });
+    if (remaining !== null) bar.setAttribute('aria-valuenow', String(remaining));
+    bar.append(el('span', { style: `width: ${remaining ?? 0}%` }));
+    row.append(el('span', { class: 'quota-preview-name' }, account.id), bar, el('span', { class: 'quota-preview-value' }, value));
+    return row;
+  }));
+}
 function renderBackups(book) {
   $('book-owner').textContent = `Cuenta propietaria: ${book.profile}. La cuenta de cada audio aparece en su estado.`;
   const stamp = JSON.stringify([book.id, book.backups, accountData.accounts.map(a => [a.id, a.email])]);
@@ -162,6 +183,12 @@ function renderBackups(book) {
 }
 function choose(id) {
   viewingExplorer = false;
+  if (selected !== id) {
+    currentMatrix = null;
+    matrixPage = 1;
+    currentPlanPreview = null;
+    planRequestId = null;
+  }
   selected = id;
   localStorage.setItem('selected-book', id);
   lastRender = '';
@@ -354,17 +381,22 @@ async function downloadRemoteAudios() {
   }
 }
 
+function bookProgress(book) {
+  const multimodal = book.materialSummary?.nonAudio > 0;
+  const total = multimodal ? book.materialSummary.total : book.blocks.length;
+  const done = multimodal ? book.materialSummary.ready : book.blocks.filter(b => b.state === 'done').length;
+  return { total, done, percent: total ? Math.round(done / total * 100) : 0, multimodal };
+}
+
 function getActiveStatus() {
   const selectedBook = books.find(b => b.id === selected);
   const processingBook = books.find(b => (b.blocks || []).some(bl => ['download', 'convert', 'generating', 'submitting', 'uploading', 'source_processing', 'queued'].includes(bl.state)));
-  const runningBook = books.find(b => b.running && (b.blocks || []).some(bl => bl.state !== 'done'));
+  const runningBook = books.find(b => b.running && (b.materialSummary?.pending > 0 || (b.blocks || []).some(bl => bl.state !== 'done')));
   
   const book = processingBook || runningBook || selectedBook;
   if (!book || !book.blocks || !book.blocks.length) return null;
   
-  const total = book.blocks.length;
-  const done = book.blocks.filter(b => b.state === 'done').length;
-  const percent = total ? Math.round((done / total) * 100) : 0;
+  const { total, done, percent, multimodal } = bookProgress(book);
   const activeBlock = book.blocks.find(b => ['download', 'convert', 'generating', 'submitting', 'uploading', 'source_processing', 'queued'].includes(b.state));
   
   let action = '';
@@ -380,7 +412,7 @@ function getActiveStatus() {
       : st === 'submitting' ? 'Solicitando audio'
       : st === 'queued' ? 'En cola de Google'
       : 'Generando audio';
-    action = `${book.title} · ${verb} audio ${activeBlock.number} de ${total}: «${activeBlock.title}»`;
+    action = `${book.title} · ${verb} audio ${activeBlock.number} de ${book.blocks.length}: «${activeBlock.title}»`;
     dotClass += ' active';
     isLive = true;
   } else if (book.quotaError || book.blocks.some(b => b.state === 'quota')) {
@@ -388,15 +420,15 @@ function getActiveStatus() {
     dotClass += ' waiting';
     isLive = true;
   } else if (done === total && total > 0) {
-    action = `${book.title} · Todos los audios completados (${total} MP3 listos)`;
+    action = multimodal ? `${book.title} · Todos los materiales completados (${total} listos)` : `${book.title} · Todos los audios completados (${total} MP3 listos)`;
     dotClass += ' done';
     isLive = false;
   } else if (book.running) {
-    action = `${book.title} · Procesando cola (${done} de ${total} listos)`;
+    action = `${book.title} · Procesando cola (${done} de ${total} ${multimodal ? 'materiales ' : ''}listos)`;
     dotClass += ' active';
     isLive = true;
   } else {
-    action = `${book.title} · ${done} de ${total} audios listos`;
+    action = `${book.title} · ${done} de ${total} ${multimodal ? 'materiales' : 'audios'} listos`;
     dotClass += ' paused';
     isLive = false;
   }
@@ -510,9 +542,7 @@ function render() {
     status.append(el('span',{},book.error || labels[book.state] || book.state));
     if (['review','error','auth'].includes(book.state)) status.append(el('button',{class:'quiet',onclick:()=>act(()=>api(`/api/books/${book.id}/retry`,{method:'POST'}))},book.state === 'review' ? 'Comprobar de nuevo' : 'Reintentar'));
   }
-  const doneCount = book.blocks.filter(b => b.state === 'done').length;
-  const totalCount = book.blocks.length;
-  const percent = totalCount ? Math.round((doneCount / totalCount) * 100) : 0;
+  const { done: doneCount, total: totalCount, percent, multimodal } = bookProgress(book);
   const activeBlock = book.blocks.find(b => ['download', 'convert', 'generating', 'submitting', 'uploading', 'source_processing', 'queued'].includes(b.state));
 
   let actionText = '';
@@ -526,19 +556,19 @@ function render() {
       : st === 'submitting' ? 'Solicitando audio'
       : st === 'queued' ? 'En cola de Google'
       : 'Generando audio';
-    actionText = `${verb} audio ${activeBlock.number} de ${totalCount}: «${activeBlock.title}»`;
+    actionText = `${verb} audio ${activeBlock.number} de ${book.blocks.length}: «${activeBlock.title}»`;
     pulseClass += ' active';
   } else if (book.quotaError || book.blocks.some(b => b.state === 'quota')) {
     actionText = `Esperando cuota (Generar más tarde) (${doneCount} de ${totalCount} listos)`;
     pulseClass += ' waiting';
   } else if (doneCount === totalCount && totalCount > 0) {
-    actionText = `Todos los audios completados (${totalCount} MP3 listos)`;
+    actionText = multimodal ? `Todos los materiales completados (${totalCount} listos)` : `Todos los audios completados (${totalCount} MP3 listos)`;
     pulseClass += ' done';
   } else if (!book.running) {
     actionText = `Cola pausada (${doneCount} de ${totalCount} listos)`;
     pulseClass += ' paused';
   } else {
-    actionText = `${doneCount} de ${totalCount} audios listos`;
+    actionText = `${doneCount} de ${totalCount} ${multimodal ? 'materiales' : 'audios'} listos`;
   }
 
   $('progress-label').textContent = actionText;
@@ -548,8 +578,8 @@ function render() {
 
   $('book-numbering').checked = book.numbering !== false;
   if ($('generation-mode')) $('generation-mode').value = book.generation_mode || 'immediate';
-  $('generate').textContent = book.running ? 'Cola en marcha' : book.blocks.some(b=>b.locked && b.state !== 'done') ? 'Reanudar pendientes' : 'Generar audios pendientes';
-  $('generate').disabled = book.running || book.blocks.every(b=>b.state === 'done') || !book.remoteId || uploading;
+  $('generate').textContent = book.running ? 'Cola en marcha' : multimodal ? 'Iniciar producción pendiente' : book.blocks.some(b=>b.locked && b.state !== 'done') ? 'Reanudar pendientes' : 'Generar audios pendientes';
+  $('generate').disabled = book.running || (book.blocks.every(b=>b.state === 'done') && !book.materialSummary?.pending) || !book.remoteId || uploading;
   $('pause').disabled = !book.running;
   $('files').disabled = uploading;
   $('quota').hidden = !book.quotaError;
@@ -1041,16 +1071,19 @@ function renderRecipes() {
 }
 
 async function loadMatrix(bookId) {
+  const seq = ++matrixRequestSeq;
   if (!bookId) {
     currentMatrix = null;
     return;
   }
   try {
-    const data = await api(`/api/books/${bookId}/matrix`);
+    const data = await api(`/api/books/${bookId}/matrix?page=${matrixPage}`);
+    if (seq !== matrixRequestSeq || selected !== bookId || viewingExplorer) return;
     currentMatrix = data;
     renderMatrix();
   } catch (e) {
-    currentMatrix = null;
+    if (seq !== matrixRequestSeq || selected !== bookId || viewingExplorer) return;
+    notice(`No se pudo actualizar la matriz. ${e.message}`, true);
   }
 }
 
@@ -1060,22 +1093,31 @@ function renderMatrix() {
   const reasonBox = $('waiting-reason-box');
   const tbody = $('matrix-body');
   const empty = $('empty-matrix');
+  const pagination = $('matrix-pagination');
 
-  if (!currentMatrix || !currentMatrix.matrix || !currentMatrix.matrix.length) {
+  if (!currentMatrix || currentMatrix.bookId !== selected || !currentMatrix.matrix?.length) {
     if (empty) empty.hidden = false;
     if (tbody) tbody.replaceChildren();
     if (bar) bar.hidden = true;
     if (reasonBox) reasonBox.hidden = true;
+    if (pagination) pagination.hidden = true;
     return;
   }
 
   if (empty) empty.hidden = true;
+  const page = currentMatrix.pagination;
+  if (pagination && page) {
+    const maxPage = Math.max(1, Math.ceil(page.total / page.limit));
+    pagination.hidden = maxPage <= 1;
+    $('matrix-page-info').textContent = `${page.page} de ${maxPage}`;
+    $('matrix-prev-page').disabled = page.page <= 1;
+    $('matrix-next-page').disabled = page.page >= maxPage;
+  }
   if (bar) {
     bar.hidden = false;
     const s = currentMatrix.summary || {};
     $('metric-required').textContent = s.totalRequirements || 0;
     $('metric-ready').textContent = s.ready || 0;
-    $('metric-approved').textContent = s.approved || 0;
     $('metric-waiting').textContent = s.waiting || 0;
     $('metric-outdated').textContent = s.outdated || 0;
     $('metric-issues').textContent = (s.failed || 0) + (s.reviewRequired || 0);
@@ -1092,11 +1134,24 @@ function renderMatrix() {
     }
   }
 
-  tbody.replaceChildren(...currentMatrix.matrix.map(row => {
+  const visibleIds = new Set(currentMatrix.matrix.map(row => row.blockId));
+  for (const tr of [...tbody.children]) {
+    if (!visibleIds.has(tr.dataset.blockId)) tr.remove();
+  }
+  currentMatrix.matrix.forEach((row, index) => {
+    const rowStamp = JSON.stringify(row);
+    const existing = [...tbody.children].find(tr => tr.dataset.blockId === row.blockId);
+    // Keep unchanged players mounted while other materials progress.
+    if (existing?.dataset.rowStamp === rowStamp) {
+      if (tbody.children[index] !== existing) tbody.insertBefore(existing, tbody.children[index] || null);
+      return;
+    }
     const tr = el('tr');
     tr.dataset.blockId = row.blockId;
+    tr.dataset.rowStamp = rowStamp;
 
-    const tdNum = el('td', {}, el('span', { class: 'number' }, String(row.blockNumber).padStart(2, '0')));
+    const tdNum = el('td');
+    tdNum.append(el('span', { class: 'number' }, String(row.blockNumber).padStart(2, '0')));
     const tdTitle = el('td');
     tdTitle.append(el('strong', {}, row.title || `Bloque ${row.blockNumber}`));
     if (row.sourceId) tdTitle.append(el('div', { class: 'source-name' }, `Fuente: ${row.sourceId}`));
@@ -1108,8 +1163,9 @@ function renderMatrix() {
     tdInfo.append(renderMaterialCell(row.materials?.infographic, row, 'infographic'));
 
     tr.append(tdNum, tdTitle, tdAudio, tdInfo);
-    return tr;
-  }));
+    if (existing) existing.replaceWith(tr);
+    if (tbody.children[index] !== tr) tbody.insertBefore(tr, tbody.children[index] || null);
+  });
 }
 
 function renderMaterialCell(mat, row, kind) {
@@ -1129,56 +1185,50 @@ function renderMaterialCell(mat, row, kind) {
   }
   badgeRow.append(stBadge);
 
-  if (mat.editorial_state) {
-    const edBadge = el('span', { class: `editorial-badge ${mat.editorial_state}` }, editorialLabels[mat.editorial_state] || mat.editorial_state);
-    badgeRow.append(edBadge);
-  }
   container.append(badgeRow);
 
   if (mat.assigned_profile) {
     container.append(el('small', { class: 'account-tag' }, `Cuenta: ${mat.assigned_profile}`));
   }
 
-  if (mat.error_reason) {
-    container.append(el('div', { class: 'block-error' }, mat.error_reason));
+  if (mat.error) {
+    container.append(el('div', { class: 'block-error' }, mat.error));
   }
 
   if (mat.state === 'ready') {
     if (kind === 'audio' && mat.output_path) {
-      const audioUrl = `/api/downloads/${mat.download_job_id || mat.id}/file`;
+      const audioUrl = `/api/materials/${mat.id}/file`;
       container.append(el('audio', { controls: true, preload: 'none', src: audioUrl }));
     } else if (kind === 'infographic' && mat.output_path) {
-      const imgUrl = `/api/downloads/${mat.download_job_id || mat.id}/file`;
-      const imgLink = el('a', { href: `${imgUrl}?download=1`, target: '_blank', class: 'download-link' }, '👁️ Ver infografía (PNG)');
-      container.append(imgLink);
+      const imgUrl = `/api/materials/${mat.id}/file`;
+      const preview = el('button', {
+        type: 'button', class: 'infographic-preview',
+        'aria-label': `Ampliar infografía de ${row.title || 'este bloque'}`,
+        onclick: () => openInfographicPreview(imgUrl, row.title)
+      });
+      const error = el('small', { class: 'block-error', hidden: true }, 'No se pudo cargar la vista previa.');
+      const image = el('img', {
+        src: imgUrl, alt: `Infografía de ${row.title || 'este bloque'}`, loading: 'lazy', decoding: 'async',
+        onerror: () => { image.hidden = true; error.hidden = false; }
+      });
+      preview.append(image, error, el('span', {}, 'Ampliar'));
+      container.append(preview);
     }
   }
 
   const actions = el('div', { class: 'cell-actions' });
-  if (mat.state === 'ready') {
-    if (mat.editorial_state !== 'approved') {
-      actions.append(el('button', {
-        class: 'quiet link-button action-btn',
-        onclick: () => act(async () => {
-          await api(`/api/materials/${mat.id}/action`, { method: 'POST', data: { action: 'approve' } });
-          notice('Material aprobado.');
-          await loadMatrix(selected);
-        })
-      }, 'Aprobar'));
-    }
-    if (mat.editorial_state !== 'rejected') {
-      actions.append(el('button', {
-        class: 'quiet retry action-btn',
-        onclick: () => act(async () => {
-          await api(`/api/materials/${mat.id}/action`, { method: 'POST', data: { action: 'reject' } });
-          notice('Material rechazado.');
-          await loadMatrix(selected);
-        })
-      }, 'Rechazar'));
-    }
+  if (mat.state === 'canceled') {
+    const restore = mat.can_restore;
+    actions.append(el('button', {
+      type: 'button', class: 'quiet action-btn',
+      onclick: () => act(async () => {
+        await api(`/api/materials/${mat.id}/action`, { method: 'POST', data: { action: restore ? 'restore' : 'restart' } });
+        notice(restore ? 'Se recuperó el archivo anterior sin generar de nuevo.' : 'Se ha iniciado la generación de este material.');
+        await loadMatrix(selected);
+      })
+    }, restore ? (kind === 'audio' ? 'Recuperar audio anterior' : 'Recuperar infografía anterior') : (kind === 'audio' ? 'Generar audio' : 'Generar infografía')));
   }
-
-  if (['failed', 'review_required'].includes(mat.state) || mat.editorial_state === 'rejected') {
+  if (['failed', 'review_required'].includes(mat.state)) {
     actions.append(el('button', {
       class: 'quiet retry action-btn',
       onclick: () => act(async () => {
@@ -1187,17 +1237,6 @@ function renderMaterialCell(mat, row, kind) {
         await loadMatrix(selected);
       })
     }, 'Reintentar'));
-  }
-
-  if (mat.editorial_state === 'rejected' || mat.state === 'ready') {
-    actions.append(el('button', {
-      class: 'quiet link-button action-btn',
-      onclick: () => act(async () => {
-        await api(`/api/materials/${mat.id}/action`, { method: 'POST', data: { action: 'revision' } });
-        notice('Nueva revisión creada.');
-        await loadMatrix(selected);
-      })
-    }, 'Nueva revisión'));
   }
 
   if (!['ready', 'failed', 'canceled'].includes(mat.state)) {
@@ -1215,16 +1254,38 @@ function renderMaterialCell(mat, row, kind) {
   return container;
 }
 
+function openInfographicPreview(url, title) {
+  const dialog = $('infographic-modal');
+  const image = $('infographic-full-image');
+  $('infographic-title').textContent = title || 'Infografía';
+  $('infographic-preview-error').hidden = true;
+  image.hidden = false;
+  image.alt = `Infografía de ${title || 'este bloque'}`;
+  image.src = url;
+  $('infographic-download').href = `${url}?download=1`;
+  if (!dialog.open) dialog.showModal();
+}
+
+$('infographic-close')?.addEventListener('click', () => $('infographic-modal').close());
+$('infographic-full-image')?.addEventListener('error', () => {
+  $('infographic-full-image').hidden = true;
+  $('infographic-preview-error').hidden = false;
+});
+$('infographic-modal')?.addEventListener('close', () => $('infographic-full-image').removeAttribute('src'));
+
 async function openPlanPreview() {
   if (!selected) return;
+  const bookId = selected;
   const recipeId = $('recipe-selector')?.value || 'study-book';
   notice('Calculando plan de producción multimodal…');
   try {
-    const plan = await api(`/api/books/${selected}/plan/preview`, {
+    const plan = await api(`/api/books/${bookId}/plan/preview`, {
       method: 'POST',
       data: { recipeId }
     });
+    if (selected !== bookId || viewingExplorer) return;
     currentPlanPreview = plan;
+    planRequestId = crypto.randomUUID();
     renderPlanModal(plan);
     $('plan-modal').showModal();
     notice('');
@@ -1240,19 +1301,18 @@ function renderPlanModal(plan) {
 
   const s = plan.summary || {};
   summaryEl.innerHTML = `
-    <div class="summary-card"><strong>${escapeHtml(plan.recipe?.name || 'Receta')}</strong><small>Receta seleccionada</small></div>
-    <div class="summary-card"><strong>${s.total || 0}</strong><small>Total tareas estimadas</small></div>
-    <div class="summary-card"><strong>${s.audio || 0}</strong><small>Audios a planear</small></div>
-    <div class="summary-card"><strong>${s.infographic || 0}</strong><small>Infografías a planear</small></div>
-    <div class="summary-card"><strong>${s.existing || 0}</strong><small>Ya existentes (omitidas)</small></div>
+    <div class="summary-card"><strong>${escapeHtml(plan.recipeName || 'Receta')}</strong><small>Receta seleccionada</small></div>
+    <div class="summary-card"><strong>${s.totalRequirements || 0}</strong><small>Materiales requeridos</small></div>
+    <div class="summary-card"><strong>${s.toCreate || 0}</strong><small>Nuevas tareas</small></div>
+    <div class="summary-card"><strong>${s.ready || 0}</strong><small>Ya listos</small></div>
+    <div class="summary-card"><strong>${s.reusable || 0}</strong><small>Ya planificados</small></div>
   `;
 
-  const tasks = plan.tasks || [];
+  const tasks = plan.requirements || [];
   if (!tasks.length) {
     detailsEl.innerHTML = '<p class="muted">Todos los materiales requeridos para los bloques existentes ya están planificados o completados.</p>';
   } else {
     detailsEl.innerHTML = `
-      <p><strong>Hash de sincronización canónico:</strong> <code>${escapeHtml(plan.canonicalHash)}</code></p>
       <div class="table-wrap" style="max-height: 240px; overflow-y: auto;">
         <table>
           <thead>
@@ -1262,9 +1322,9 @@ function renderPlanModal(plan) {
             ${tasks.map(t => `
               <tr>
                 <td>${t.blockNumber}</td>
-                <td><span class="badge ${t.kind}">${t.kind}</span></td>
-                <td>${escapeHtml(t.title)}</td>
-                <td><small>${escapeHtml(t.reason || 'Nuevo requisito')}</small></td>
+                <td>${t.type === 'audio' ? 'Audio' : 'Infografía'}</td>
+                <td>${escapeHtml(t.blockTitle)}</td>
+                <td><small>${escapeHtml(t.type === 'audio' && t.status === 'ready' ? 'Se conserva el audio existente' : ({ to_create: 'Nuevo requisito', ready: 'Ya listo', reusable: 'Ya planificado', restore: 'Se recupera el archivo anterior sin regenerar', outdated: 'Desactualizado (se conserva; no se regenera)', review_required: 'Revisión necesaria', canceled: 'Nueva generación de este material cancelado' })[t.status] || t.status)}</small></td>
               </tr>
             `).join('')}
           </tbody>
@@ -1275,21 +1335,23 @@ function renderPlanModal(plan) {
 }
 
 async function confirmPlan() {
-  if (!selected || !currentPlanPreview) return;
+  if (!selected || !currentPlanPreview || currentPlanPreview.bookId !== selected) return;
+  const plan = currentPlanPreview;
   $('plan-modal-confirm').disabled = true;
   notice('Confirmando plan de producción…');
   try {
-    const res = await api(`/api/books/${selected}/plan/confirm`, {
+    const res = await api(`/api/books/${plan.bookId}/plan/confirm`, {
       method: 'POST',
       data: {
-        recipeId: currentPlanPreview.recipe?.id,
-        recipeVersion: currentPlanPreview.recipe?.version,
-        requestId: crypto.randomUUID()
+        recipeId: plan.recipeId,
+        recipeVersion: plan.recipeVersion,
+        requestId: planRequestId
       }
     });
     $('plan-modal').close();
-    notice(`Plan confirmado. ${res.createdCount || 0} nuevas tareas de material preparadas.`);
+    notice(res.running ? 'Plan confirmado. La producción pendiente se ha iniciado; los audios existentes se conservan.' : 'Plan confirmado. No hay materiales pendientes de generar.');
     currentPlanPreview = null;
+    planRequestId = null;
     await refresh();
     await loadMatrix(selected);
   } catch (e) {
@@ -1304,7 +1366,15 @@ $('plan-modal-confirm')?.addEventListener('click', confirmPlan);
 $('plan-modal-cancel')?.addEventListener('click', () => {
   $('plan-modal').close();
   currentPlanPreview = null;
+  planRequestId = null;
 });
+
+for (const [id, delta] of [['matrix-prev-page', -1], ['matrix-next-page', 1]]) {
+  $(id)?.addEventListener('click', () => {
+    matrixPage = Math.max(1, matrixPage + delta);
+    loadMatrix(selected);
+  });
+}
 
 $('tab-view-matrix')?.addEventListener('click', () => {
   activeViewTab = 'matrix';

@@ -11,6 +11,7 @@ export function redact(value) {
 }
 export function classify(message) {
   const text = String(message);
+  if (/no such option|no such command|unexpected extra argument|missing option/i.test(text)) return 'CLI_USAGE';
   if (/network_error|ConnectTimeout|ECONN|socket|502|503|504/i.test(text)) return 'TEMPORARY';
   if (/auth|cookies? expired|log.?in|session expired|unauthenticated|401/i.test(text)) return 'AUTH_REQUIRED';
   if (/resource.exhausted|quota|rate.?limit|429|allowance|usage limit/i.test(text)) return 'QUOTA';
@@ -52,13 +53,14 @@ export class CommandRunner {
       };
       child.stdout.on('data', collect('out')); child.stderr.on('data', collect('err'));
       child.on('error', e => { failure = new ProviderError('UNAVAILABLE', `No se pudo ejecutar ${binary}: ${redact(e.message)}`); });
-      child.on('close', code => {
+      child.on('close', (code, signalName) => {
         clearTimeout(timer);
         signal?.removeEventListener('abort', onAbort);
         this.children.delete(child);
         if (failure) reject(failure);
         else if (code !== 0) {
-          const raw = (stderr || stdout || 'El proveedor terminó sin respuesta.').trim();
+          const output = (stderr || stdout).trim();
+          const raw = output || `El conector terminó sin salida (código ${code ?? 'desconocido'}${signalName ? `, señal ${signalName}` : ''}). No se pudo confirmar el resultado de esta operación.`;
           let message = raw;
           try {
             const parsed = JSON.parse(raw);
@@ -68,7 +70,10 @@ export class CommandRunner {
             }
           } catch {}
           message = redact(message).slice(0, 1200);
-          reject(new ProviderError(classify(message || raw), message, code === null));
+          const error = new ProviderError(classify(message || raw), message, code === null || !output);
+          error.exitCode = code;
+          error.signal = signalName;
+          reject(error);
         } else resolve(stdout);
       });
     });
@@ -362,7 +367,7 @@ export class Provider {
     const tmp = `${destination}.part.mp4`;
     await rm(tmp, { force: true });
     try {
-      await this.cli(['download', 'video', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--no-progress', '-p', this.profile], { parse: false, timeout: 660000, signal });
+      await this.cli(['download', 'video', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--no-progress'], { parse: false, timeout: 660000, signal });
       if ((await stat(tmp)).size === 0) throw new ProviderError('TEMPORARY', 'El vídeo descargado está vacío.');
       await rename(tmp, destination);
     } catch (e) {
@@ -375,7 +380,7 @@ export class Provider {
     const tmp = `${destination}.part.md`;
     await rm(tmp, { force: true });
     try {
-      await this.cli(['download', 'report', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '-p', this.profile], { parse: false, timeout: 120000, signal });
+      await this.cli(['download', 'report', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp], { parse: false, timeout: 120000, signal });
       if ((await stat(tmp)).size === 0) throw new ProviderError('TEMPORARY', 'El informe descargado está vacío.');
       await rename(tmp, destination);
     } catch (e) {
@@ -389,7 +394,7 @@ export class Provider {
     const tmp = `${destination}.part.${ext}`;
     await rm(tmp, { force: true });
     try {
-      await this.cli(['download', 'slide-deck', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--format', ext, '--no-progress', '-p', this.profile], { parse: false, timeout: 180000, signal });
+      await this.cli(['download', 'slide-deck', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--format', ext, '--no-progress'], { parse: false, timeout: 180000, signal });
       if ((await stat(tmp)).size === 0) throw new ProviderError('TEMPORARY', 'Las diapositivas descargadas están vacías.');
       await rename(tmp, destination);
     } catch (e) {
@@ -402,7 +407,7 @@ export class Provider {
     const tmp = `${destination}.part.png`;
     await rm(tmp, { force: true });
     try {
-      await this.cli(['download', 'infographic', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--no-progress', '-p', this.profile], { parse: false, timeout: 180000, signal });
+      await this.cli(['download', 'infographic', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--no-progress'], { parse: false, timeout: 180000, signal });
       await this.validateImage(tmp, { signal });
       await rename(tmp, destination);
     } catch (e) {
@@ -415,7 +420,7 @@ export class Provider {
     const tmp = `${destination}.part.json`;
     await rm(tmp, { force: true });
     try {
-      await this.cli(['download', 'mind-map', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '-p', this.profile], { parse: false, timeout: 120000, signal });
+      await this.cli(['download', 'mind-map', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp], { parse: false, timeout: 120000, signal });
       if ((await stat(tmp)).size === 0) throw new ProviderError('TEMPORARY', 'El mapa mental descargado está vacío.');
       await rename(tmp, destination);
     } catch (e) {
@@ -429,7 +434,7 @@ export class Provider {
     const tmp = `${destination}.part.${ext}`;
     await rm(tmp, { force: true });
     try {
-      await this.cli(['download', 'quiz', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--format', format, '-p', this.profile], { parse: false, timeout: 120000, signal });
+      await this.cli(['download', 'quiz', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--format', format], { parse: false, timeout: 120000, signal });
       if ((await stat(tmp)).size === 0) throw new ProviderError('TEMPORARY', 'El cuestionario descargado está vacío.');
       await rename(tmp, destination);
     } catch (e) {
@@ -443,7 +448,7 @@ export class Provider {
     const tmp = `${destination}.part.${ext}`;
     await rm(tmp, { force: true });
     try {
-      await this.cli(['download', 'flashcards', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--format', format, '-p', this.profile], { parse: false, timeout: 120000, signal });
+      await this.cli(['download', 'flashcards', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '--format', format], { parse: false, timeout: 120000, signal });
       if ((await stat(tmp)).size === 0) throw new ProviderError('TEMPORARY', 'Las tarjetas descargadas están vacías.');
       await rename(tmp, destination);
     } catch (e) {
@@ -456,7 +461,7 @@ export class Provider {
     const tmp = `${destination}.part.csv`;
     await rm(tmp, { force: true });
     try {
-      await this.cli(['download', 'data-table', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp, '-p', this.profile], { parse: false, timeout: 120000, signal });
+      await this.cli(['download', 'data-table', remoteId(bookId), '--id', remoteId(artifactId), '--output', tmp], { parse: false, timeout: 120000, signal });
       if ((await stat(tmp)).size === 0) throw new ProviderError('TEMPORARY', 'La tabla descargada está vacía.');
       await rename(tmp, destination);
     } catch (e) {

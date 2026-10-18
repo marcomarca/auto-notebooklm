@@ -1,15 +1,87 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, rm, stat, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fixture, temporary } from './helpers.mjs';
 import { makeApp } from '../server.mjs';
 import { FakeProvider } from './helpers.mjs';
 
+test('multimodal conserva los 8 audios existentes y solo genera las 8 infografías faltantes', async t => {
+  const f = await fixture(t);
+  for (let i = 1; i <= 8; i++) f.add(i);
+  f.store.update('books', f.book.id, { running: 1 });
+  await f.tick(65);
+  const audios = f.store.materialTasks(f.book.id).filter(task => task.type === 'audio');
+  assert.equal(audios.length, 8);
+  assert.ok(audios.every(task => task.state === 'ready'));
+  const files = await Promise.all(audios.map(task => readFile(task.output_path)));
+  // Reproduce migrated metadata, including a content-setting difference the user accepts.
+  for (const task of audios) {
+    f.store.update('material_tasks', task.id, {
+      params_json: JSON.stringify({ format: 'deep_dive', length: 'long', language: 'es-419', mode: 'immediate' }),
+      params_hash: 'legacy-hash'
+    });
+  }
+  const preview = previewProductionPlan({ store: f.store, bookId: f.book.id, recipeId: 'study-book' });
+  assert.equal(preview.summary.ready, 8);
+  assert.equal(preview.summary.toCreate, 8);
+  assert.equal(preview.summary.outdated, 0);
+  assert.ok(preview.requirements.filter(req => req.type === 'audio').every(req => req.status === 'ready'));
+  f.provider.calls.length = 0;
+  const plan = appConfirmPlan(f.store, f.book.id, 'study-book', 'preserve-existing-audio');
+  assert.equal(plan.createdCount, 8);
+  assert.equal(plan.reusedCount, 8);
+  assert.equal(plan.running, true);
+  assert.equal(f.store.book(f.book.id).running, 1);
+  assert.ok(f.store.materialTasks(f.book.id).filter(task => task.type === 'infographic').every(task => task.state === 'queued'));
+  await f.tick(45);
+  assert.equal(f.provider.calls.filter(call => call[0] === 'generateInfographic').length, 8);
+  assert.equal(f.provider.calls.filter(call => ['generate', 'download', 'convert'].includes(call[0])).length, 0);
+  for (const [index, original] of audios.entries()) {
+    assert.deepEqual(f.store.currentMaterialTask(original.block_id, 'audio'), f.store.materialTask(original.id));
+    assert.equal(f.store.currentMaterialTask(original.block_id, 'audio').revision, original.revision);
+    assert.deepEqual(await readFile(original.output_path), files[index]);
+  }
+});
+
+test('confirmar inicia automáticamente; reintentar la confirmación no deshace una pausa posterior', async t => {
+  const f = await fixture(t);
+  f.add(1);
+  const first = appConfirmPlan(f.store, f.book.id, 'study-book', 'auto-start-plan');
+  assert.equal(first.running, true);
+  assert.equal(f.store.book(f.book.id).running, 1);
+  assert.ok(f.store.materialTasks(f.book.id).every(task => task.state === 'queued'));
+  f.store.update('books', f.book.id, { running: 0 });
+  const replay = appConfirmPlan(f.store, f.book.id, 'study-book', 'auto-start-plan');
+  assert.equal(replay.idempotent, true);
+  assert.equal(replay.running, false);
+  assert.equal(f.store.book(f.book.id).running, 0);
+});
+
+test('metadatos de audio migrados no provocan falsos desactualizados; un cambio de fuente sigue siendo visible', async t => {
+  const f = await fixture(t);
+  const block = f.add(1);
+  const task = f.store.createMaterialTask({
+    bookId: f.book.id, blockId: block.id, type: 'audio', sourceFingerprint: block.hash,
+    params: { format: 'deep_dive', length: 'default', language: 'es-419', mode: 'immediate' }
+  });
+  const pending = previewProductionPlan({ store: f.store, bookId: f.book.id, recipeId: 'study-book' });
+  assert.equal(pending.summary.reusable, 1);
+  assert.equal(pending.summary.outdated, 0);
+  f.store.update('material_tasks', task.id, { state: 'ready', source_fingerprint: 'old-source-hash' });
+  const changed = previewProductionPlan({ store: f.store, bookId: f.book.id, recipeId: 'study-book' });
+  assert.equal(changed.summary.outdated, 1);
+  assert.equal(changed.requirements.find(req => req.type === 'audio').status, 'outdated');
+  const plan = appConfirmPlan(f.store, f.book.id, 'study-book', 'changed-source');
+  assert.equal(plan.createdCount, 1);
+  assert.equal(f.store.currentMaterialTask(block.id, 'audio').id, task.id);
+  assert.equal(f.provider.calls.filter(call => call[0] === 'generate').length, 0);
+});
+
 test('Fase 3: Recetas API - listar recetas base y crear receta personalizada con validación', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'auto-nlm-rec-'));
-  const app = await makeApp({ dataDir: dir, exportsDir: join(dir, 'exports'), provider: new FakeProvider(), worker: false, check: false });
+  const app = await makeApp({ port: 0, dataDir: dir, exportsDir: join(dir, 'exports'), provider: new FakeProvider(), worker: false, check: false });
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
 
   // 1. List default recipes
@@ -55,7 +127,7 @@ test('Fase 3: Recetas API - listar recetas base y crear receta personalizada con
 
 test('Fase 3: Previsualización y confirmación idempotente con rechazo de conflicto (409)', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'auto-nlm-plan-'));
-  const app = await makeApp({ dataDir: dir, exportsDir: join(dir, 'exports'), provider: new FakeProvider(), worker: false, check: false });
+  const app = await makeApp({ port: 0, dataDir: dir, exportsDir: join(dir, 'exports'), provider: new FakeProvider(), worker: false, check: false });
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
 
   const book = app.store.createBook({ title: 'Libro Idempotencia', requestId: 'req-idem-book' }, 'default');
@@ -291,7 +363,7 @@ test('Fase 3: Fallo de descarga reintenta descarga del ID existente y NO regener
 
 test('Fase 3: Gestión editorial y nuevas revisiones (approve, reject, revision)', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'auto-nlm-mat-'));
-  const app = await makeApp({ dataDir: dir, exportsDir: join(dir, 'exports'), provider: new FakeProvider(), worker: false, check: false });
+  const app = await makeApp({ port: 0, dataDir: dir, exportsDir: join(dir, 'exports'), provider: new FakeProvider(), worker: false, check: false });
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
 
   const book = app.store.createBook({ title: 'Libro Editorial', requestId: 'req-edit-book' }, 'default');
@@ -350,7 +422,7 @@ test('Fase 3: Gestión editorial y nuevas revisiones (approve, reject, revision)
 
 test('Fase 3: Búsqueda en biblioteca /api/library/search con filtros y paginación', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'auto-nlm-search-'));
-  const app = await makeApp({ dataDir: dir, exportsDir: join(dir, 'exports'), provider: new FakeProvider(), worker: false, check: false });
+  const app = await makeApp({ port: 0, dataDir: dir, exportsDir: join(dir, 'exports'), provider: new FakeProvider(), worker: false, check: false });
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
 
   const bA = app.store.createBook({ title: 'Historia Romana', requestId: 'req-hist' }, 'default');
@@ -379,7 +451,7 @@ test('Fase 3: Búsqueda en biblioteca /api/library/search con filtros y paginaci
   assert.equal(data3.ok, true);
   assert.equal(data3.items.length, 0);
 });
-import { confirmProductionPlan as cppDirect } from '../production.mjs';
+import { confirmProductionPlan as cppDirect, previewProductionPlan } from '../production.mjs';
 function appConfirmPlan(store, bookId, recipeId, requestId) {
   return cppDirect({ store, bookId, recipeId, requestId });
 }

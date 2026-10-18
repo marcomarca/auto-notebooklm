@@ -108,7 +108,6 @@
       <div id="material-metrics-bar" class="metrics-bar" hidden>
         <div class="metric-item"><strong id="metric-required">0</strong><small>Requeridos</small></div>
         <div class="metric-item"><strong id="metric-ready">0</strong><small>Descargados</small></div>
-        <div class="metric-item"><strong id="metric-approved">0</strong><small>Aprobados</small></div>
         <div class="metric-item"><strong id="metric-waiting">0</strong><small>Esperando</small></div>
         <div class="metric-item"><strong id="metric-outdated">0</strong><small>Desactualizados</small></div>
         <div class="metric-item"><strong id="metric-issues">0</strong><small>Con incidencias</small></div>
@@ -164,6 +163,11 @@
           <tbody id="matrix-body"></tbody>
         </table>
         <div id="empty-matrix" class="remote-empty-state" hidden>No hay requisitos en la matriz. Usa «Preparar pendientes» para planificar según la receta.</div>
+        <nav id="matrix-pagination" aria-label="Páginas de bloques" hidden>
+          <button id="matrix-prev-page" class="quiet" type="button" aria-label="Página anterior">←</button>
+          <span id="matrix-page-info"></span>
+          <button id="matrix-next-page" class="quiet" type="button" aria-label="Página siguiente">→</button>
+        </nav>
       </div>
 
       <div id="blocks-section" class="table-wrap" hidden>
@@ -243,6 +247,11 @@
       <footer>Los archivos se guardan en la carpeta <button id="open-exports-btn" class="inline-link" type="button" title="Abrir carpeta exports en el Explorador de Windows">exports</button> del proyecto. Puedes cerrar esta pestaña; mantén la aplicación ejecutándose para continuar.</footer>
     </section>
   </main>
+  <aside id="quota-preview" class="quota-preview" aria-labelledby="quota-preview-title" hidden>
+    <strong id="quota-preview-title">Cuota disponible</strong>
+    <div id="quota-preview-accounts"></div>
+    <small>Saldo mínimo · Última consulta</small>
+  </aside>
   <dialog id="delete-modal" class="confirm-modal">
     <form method="dialog" id="delete-modal-form">
       <h3>Eliminar contenido de NotebookLM</h3>
@@ -257,14 +266,23 @@
   <dialog id="plan-modal" class="confirm-modal plan-modal-dialog">
     <form method="dialog" id="plan-modal-form">
       <h3>Plan de producción multimodal</h3>
-      <p class="muted">Previsualización de requisitos y tareas antes de iniciar la producción.</p>
+      <p class="muted">Al confirmar se inicia la producción de los materiales faltantes. Los audios existentes se conservan.</p>
       <div id="plan-modal-summary" class="plan-summary-grid"></div>
       <div id="plan-modal-details" class="modal-details"></div>
       <div class="modal-actions">
         <button id="plan-modal-cancel" type="button" class="quiet">Cerrar</button>
-        <button id="plan-modal-confirm" type="button" class="link-button">Confirmar plan e iniciar</button>
+        <button id="plan-modal-confirm" type="button" class="link-button">Confirmar e iniciar</button>
       </div>
     </form>
+  </dialog>
+  <dialog id="infographic-modal" class="infographic-modal" aria-labelledby="infographic-title">
+    <header class="infographic-modal-header">
+      <h3 id="infographic-title">Infografía</h3>
+      <button id="infographic-close" class="quiet" type="button" autofocus>Cerrar</button>
+    </header>
+    <p id="infographic-preview-error" role="status" hidden>No se pudo cargar la imagen. Cierra esta vista y vuelve a intentarlo.</p>
+    <img id="infographic-full-image" alt="">
+    <a id="infographic-download" class="download-link" download>Descargar PNG</a>
   </dialog>
 </body>
 </html>

@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID, createHash } from 'node:crypto';
-import { mkdirSync, existsSync, renameSync, rmSync } from 'node:fs';
+import { mkdirSync, existsSync, renameSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 export function title(value) {
@@ -651,6 +651,11 @@ export class Store {
       numbering: book.numbering !== 0 && book.numbering !== false,
       state: book.state, running: !!book.running, error: book.error, errorCode: book.error_code,
       nextAt: Math.max(book.next_at, book.quota_at) || null, quotaError: book.quota_error,
+      materialSummary: this.get(`SELECT COUNT(*) AS total,
+        COALESCE(SUM(state='ready'),0) AS ready,
+        COALESCE(SUM(type!='audio'),0) AS nonAudio,
+        COALESCE(SUM(state IN ('planned','queued','submitting','remote_pending','download_pending','waiting_quota','waiting_auth','retry_wait')),0) AS pending
+        FROM material_tasks WHERE book_id=? AND is_current=1 AND canceled_at IS NULL`, book.id),
       blocks: this.blocks(book.id).map(b => ({
         id: b.id, number: b.position, title: b.title, filename: b.filename, sourceId: b.source_id,
         artifactId: b.artifact_id, state: b.state, stage: b.stage, locked: !!b.locked,
@@ -796,7 +801,7 @@ export class Store {
       const now = Date.now();
       const paramsJson = typeof input.params === 'string' ? input.params : JSON.stringify(input.params || {});
       const paramsHash = input.paramsHash || createHash('sha256').update(paramsJson).digest('hex');
-      const revision = input.revision || 1;
+      const revision = input.revision || this.get('SELECT COALESCE(MAX(revision),0)+1 AS n FROM material_tasks WHERE block_id=? AND type=?', input.blockId, input.type).n;
       const isCurrent = input.isCurrent !== undefined ? (input.isCurrent ? 1 : 0) : 1;
 
       if (isCurrent) {
@@ -992,7 +997,7 @@ export class Store {
     const tasksByBlock = new Map();
     for (const task of allTasks) {
       if (!tasksByBlock.has(task.block_id)) tasksByBlock.set(task.block_id, {});
-      tasksByBlock.get(task.block_id)[task.type] = task;
+      tasksByBlock.get(task.block_id)[task.type] = { ...task, can_restore: task.state === 'canceled' && !!this.previousReadyMaterial(task.id) };
     }
 
     const summary = {
@@ -1070,16 +1075,46 @@ export class Store {
   retryMaterialTask(id) {
     const task = this.materialTask(id);
     if (!task) throw new Error('Tarea de material inexistente.');
+    if (task.canceled_at || ['canceled', 'ready'].includes(task.state)) return task;
     const attempts = this.materialAttempts(id);
-    const lastAttempt = attempts.at(-1);
+    const lastAttempt = attempts.find(a => a.id === task.selected_attempt_id) || attempts.at(-1);
     const hasArtifact = !!(lastAttempt?.artifact_id || task.selected_remote_item_id);
-    const targetState = hasArtifact ? 'download_pending' : 'queued';
+    const targetState = hasArtifact || lastAttempt?.baseline_json ? 'remote_pending' : 'queued';
     return this.updateMaterialTask(id, {
       state: targetState,
       retry_count: 0,
       next_at: 0,
       error: null,
       error_code: null
+    });
+  }
+  previousReadyMaterial(id) {
+    const task = this.materialTask(id);
+    if (!task) return null;
+    const previous = this.all("SELECT * FROM material_tasks WHERE block_id=? AND type=? AND revision<? AND state='ready' AND canceled_at IS NULL AND output_path IS NOT NULL ORDER BY revision DESC", task.block_id, task.type, task.revision);
+    return previous.find(row => { try { return statSync(row.output_path).isFile() && statSync(row.output_path).size > 0; } catch { return false; } }) || null;
+  }
+  restorePreviousMaterial(id) {
+    return this.transaction(() => {
+      const task = this.materialTask(id);
+      if (!task || !task.is_current || task.state !== 'canceled') throw new Error('Solo se puede recuperar una revisión actual cancelada.');
+      const previous = this.previousReadyMaterial(id);
+      if (!previous) throw new Error('No hay un archivo anterior disponible para recuperar.');
+      this.update('material_tasks', task.id, { is_current: 0, updated_at: Date.now() });
+      this.update('material_tasks', previous.id, { is_current: 1, updated_at: Date.now() });
+      if (task.type === 'audio') {
+        const attempt = this.materialAttempts(previous.id).find(a => a.id === previous.selected_attempt_id);
+        const item = previous.selected_remote_item_id ? this.remoteItem(previous.selected_remote_item_id) : null;
+        this.update('blocks', task.block_id, {
+          state: 'done', stage: 'convert', output_path: previous.output_path,
+          artifact_id: attempt?.artifact_id || item?.remote_id || null,
+          generation_profile: attempt?.profile || this.book(task.book_id).profile,
+          canceled_at: null, cancel_requested_at: null, cancel_reason: null,
+          baseline: null, attempts: 0, next_at: 0, error: null, error_code: null
+        });
+      }
+      this.recordProductionEvent({ taskId: previous.id, bookId: task.book_id, event: 'previous_material_restored', fromState: task.id, toState: previous.id, reason: 'Se recuperó el archivo anterior sin regenerar.' });
+      return this.materialTask(previous.id);
     });
   }
   cancelMaterialTask(id, reason = 'Cancelado por el usuario') {
@@ -1101,7 +1136,7 @@ export class Store {
       const block = this.block(task.block_id);
       if (!block) throw new Error('Bloque inexistente.');
 
-      const nextRev = task.revision + 1;
+      const nextRev = this.get('SELECT COALESCE(MAX(revision),0)+1 AS n FROM material_tasks WHERE block_id=? AND type=?', task.block_id, task.type).n;
       const newTask = this.createMaterialTask({
         bookId: task.book_id,
         blockId: task.block_id,

@@ -13,7 +13,7 @@ import { ConnectorGate } from './connector-gate.mjs';
 import { Queue } from './queue.mjs';
 import { Accounts, profileId } from './accounts.mjs';
 import { syncNotebook } from './sync.mjs';
-import { validateRecipe, previewProductionPlan, confirmProductionPlan } from './production.mjs';
+import { validateRecipe, previewProductionPlan, confirmProductionPlan, startProduction } from './production.mjs';
 import { createDelivery, listDeliveries, getDelivery } from './delivery.mjs';
 import { createBackup, validateBackup, restoreBackup } from './backup.mjs';
 import { version as appVersion, mode, dataDir as defaultDataDir, exportsDir as defaultExportsDir } from './runtime.mjs';
@@ -440,6 +440,7 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
           if ((parts[4] === 'plan' || parts[4] === 'confirm') && req.method === 'POST') {
             const payload = await body(req);
             try {
+              if (queue.active && store.materialTasks(book.id, { currentOnly: true }).some(t => t.state === 'canceled')) await queue.active;
               const confirmed = confirmProductionPlan({
                 store,
                 bookId: book.id,
@@ -460,12 +461,9 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
           if (parts[4] === 'control' && req.method === 'POST') {
             const { action } = await body(req);
             if (!['start', 'pause'].includes(action)) throw new Error('Acción de producción inválida.');
-            const running = action === 'start' ? 1 : 0;
-            store.update('books', book.id, { running });
-            if (running) {
-              store.db.prepare("UPDATE material_tasks SET state='queued', updated_at=? WHERE book_id=? AND is_current=1 AND state='planned'").run(Date.now(), book.id);
-            }
-            return send(res, 200, { ok: true, running });
+            if (action === 'start') return send(res, 200, startProduction({ store, bookId: book.id }));
+            store.update('books', book.id, { running: 0 });
+            return send(res, 200, { ok: true, running: false });
           }
         }
         if ((parts[3] === 'materials' || parts[3] === 'matrix') && req.method === 'GET') {
@@ -536,7 +534,8 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
         if (parts[3] === 'queue' && req.method === 'POST') {
           const { action, mode } = await body(req);
           if (!['start', 'pause', 'resume'].includes(action)) throw new Error('Acción de cola inválida.');
-          const updates = { running: action === 'pause' ? 0 : 1 };
+          if (action !== 'pause') return send(res, 200, startProduction({ store, bookId: book.id, mode }));
+          const updates = { running: 0 };
           if (mode && ['immediate', 'later'].includes(mode)) updates.generation_mode = mode;
           store.update('books', book.id, updates);
           return send(res, 200, { ok: true });
@@ -868,14 +867,15 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
 
         return send(res, 200, [...blockItems, ...jobItems]);
       }
-      if (parts[0] === 'api' && parts[1] === 'downloads' && parts[2]) {
+      if (parts[0] === 'api' && parts[2] && (parts[1] === 'downloads' || (parts[1] === 'materials' && parts[3] === 'file'))) {
         const id = parts[2];
         if (parts[3] === 'file' && ['GET', 'HEAD'].includes(req.method)) {
-          const job = store.downloadJob(id);
-          const block = !job ? store.block(id) : null;
-          const item = job || block;
+          const material = parts[1] === 'materials' ? store.materialTask(id) : null;
+          const job = parts[1] === 'downloads' ? store.downloadJob(id) : null;
+          const block = parts[1] === 'downloads' && !job ? store.block(id) : null;
+          const item = material || job || block;
           if (!item) return send(res, 404, { error: 'Descarga inexistente.' });
-          if (item.state !== 'done') return send(res, 400, { error: 'La descarga no ha finalizado.' });
+          if (item.state !== (material ? 'ready' : 'done')) return send(res, 400, { error: 'La descarga no ha finalizado.' });
           const filePath = item.output_path;
           if (!filePath) return send(res, 404, { error: 'Archivo no encontrado.' });
           const fsStat = await import('node:fs/promises').then(fs => fs.stat(filePath)).catch(() => null);
@@ -983,6 +983,19 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
           } else if (action === 'cancel') {
             const result = queue.cancelMaterialTask(task.id, reason);
             return send(res, 200, result);
+          } else if (action === 'restore') {
+            const updated = await queue.restorePreviousMaterial(task.id);
+            return send(res, 200, { ok: true, task: updated });
+          } else if (action === 'restart') {
+            if (queue.active) await queue.active;
+            const updated = store.transaction(() => {
+              const current = store.materialTask(task.id);
+              if (!current.is_current || current.state !== 'canceled') throw new Error('Solo se puede reiniciar un material actual cancelado.');
+              const next = store.createMaterialRevision(current.id);
+              startProduction({ store, bookId: task.book_id });
+              return store.materialTask(next.id);
+            });
+            return send(res, 201, { ok: true, task: updated });
           } else if (action === 'revision') {
             const updated = store.createMaterialRevision(task.id);
             return send(res, 201, { ok: true, task: updated });

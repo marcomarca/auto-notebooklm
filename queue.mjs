@@ -649,12 +649,15 @@ export class Queue {
     const controller = new AbortController();
     this.controllers.set(task.id, controller);
     let provider = this.providerFor(book, block);
+    const attempts = this.store.materialAttempts(task.id);
+    const lastAttempt = attempts.find(a => a.id === task.selected_attempt_id) || attempts.at(-1);
+    const catalogItem = task.selected_remote_item_id ? this.store.remoteItem(task.selected_remote_item_id) : null;
+    const knownArtifactId = lastAttempt?.artifact_id || catalogItem?.remote_id;
+    if (lastAttempt?.profile) provider = this.providerFor(book, { generation_profile: lastAttempt.profile });
 
     try {
       if (task.state === 'download_pending') {
-        const attempts = this.store.materialAttempts(task.id);
-        const lastAttempt = attempts.at(-1);
-        const artifactId = lastAttempt?.artifact_id || task.selected_remote_item_id;
+        const artifactId = knownArtifactId;
         if (!artifactId) throw new ProviderError('REJECTED', 'Falta el ID del artefacto para la descarga.');
 
         const bookRow = this.store.book(book.id) || book;
@@ -693,9 +696,7 @@ export class Queue {
           });
         }
       } else if (task.state === 'remote_pending') {
-        const attempts = this.store.materialAttempts(task.id);
-        const lastAttempt = attempts.at(-1);
-        let artifactId = lastAttempt?.artifact_id || task.selected_remote_item_id;
+        let artifactId = knownArtifactId;
         if (!artifactId && lastAttempt?.baseline_json) {
           const before = JSON.parse(lastAttempt.baseline_json);
           const currentArtifacts = await provider.artifacts(book.remote_id);
@@ -703,7 +704,7 @@ export class Queue {
             !before.includes(a.artifact_id || a.id) &&
             a.type === task.type &&
             Array.isArray(a.source_ids) &&
-            a.source_ids.includes(block.source_id)
+            a.source_ids.length === 1 && a.source_ids[0] === block.source_id
           );
           if (matches.length === 1) {
             artifactId = matches[0].artifact_id || matches[0].id;
@@ -717,9 +718,11 @@ export class Queue {
           } else if (matches.length > 1) {
             throw new ProviderError('REVIEW', 'Múltiples artefactos nuevos detectados tras reconciliación. Revisión requerida.');
           } else {
+            if ((task.retry_count || 0) >= 8) throw new ProviderError('REVIEW', 'No se pudo identificar el resultado tras varias consultas. Comprueba el cuaderno; no se enviará otra generación.');
             const nextAt = this.now() + 15000;
             this.store.updateMaterialTask(task.id, {
               state: 'remote_pending',
+              retry_count: (task.retry_count || 0) + 1,
               next_at: nextAt,
               error: 'Esperando propagación del artefacto generado en NotebookLM.',
               error_code: 'TEMPORARY'
@@ -882,18 +885,27 @@ export class Queue {
         });
       }
     } catch (error) {
-      this.handleMaterialTaskError(task, error, provider);
+      this.handleMaterialTaskError(this.store.materialTask(task.id), error, provider);
     } finally {
       this.controllers.delete(task.id);
     }
   }
   handleMaterialTaskError(task, error, provider) {
+    if (task.canceled_at || task.state === 'canceled') return;
     const code = error.code || 'PROVIDER';
     const attempts = (task.retry_count || 0) + 1;
     let state = 'failed';
     let nextAt = 0;
+    const selectedAttempt = this.store.materialAttempts(task.id).find(a => a.id === task.selected_attempt_id);
+    const uncertainSubmission = task.state === 'submitting' && selectedAttempt?.baseline_json && !selectedAttempt.artifact_id &&
+      !['QUOTA', 'CLI_USAGE', 'UNAVAILABLE'].includes(code);
 
-    if (task.state === 'download_pending') {
+    if (uncertainSubmission) {
+      state = 'remote_pending';
+      nextAt = this.now() + 15000;
+    } else if (code === 'CLI_USAGE') {
+      state = 'review_required';
+    } else if (task.state === 'download_pending') {
       if (attempts <= 3) {
         state = 'download_pending';
         nextAt = this.now() + [15000, 30000, 60000][attempts - 1];
@@ -905,7 +917,12 @@ export class Queue {
     } else if (code === 'QUOTA') {
       state = 'waiting_quota';
       nextAt = this.now() + 30 * 60 * 1000;
-    } else if (code === 'REVIEW' || error.uncertain) {
+    } else if (code === 'REVIEW') {
+      state = 'review_required';
+    } else if (task.state === 'remote_pending' && code !== 'ARTIFACT_FAILED' && code !== 'REVIEW') {
+      state = attempts <= 3 ? 'remote_pending' : 'review_required';
+      nextAt = attempts <= 3 ? this.now() + [15000, 30000, 60000][attempts - 1] : 0;
+    } else if (error.uncertain) {
       state = 'review_required';
     } else if (code === 'TEMPORARY') {
       if (attempts <= 3) {
@@ -918,20 +935,25 @@ export class Queue {
       state = 'failed';
     }
 
+    const stage = uncertainSubmission ? 'Envío incierto; se comprobará el resultado existente' :
+      task.state === 'download_pending' ? 'Descarga del resultado existente' :
+      task.state === 'remote_pending' ? 'Consulta del resultado existente' : 'Preparación o envío';
     this.store.updateMaterialTask(task.id, {
       state,
       retry_count: attempts,
       next_at: nextAt,
-      error: redact(error.message).slice(0, 1200),
+      error: `${stage}: ${redact(error.message)}`.slice(0, 1200),
       error_code: code
     });
 
-    if (task.selected_attempt_id) {
+    if (task.selected_attempt_id && uncertainSubmission) {
       this.store.updateMaterialAttempt(task.selected_attempt_id, {
-        state: 'failed',
+        state: 'uncertain',
         error: redact(error.message).slice(0, 1200),
         error_code: code
       });
+    } else if (selectedAttempt && task.state === 'submitting' && !selectedAttempt.artifact_id && ['QUOTA', 'CLI_USAGE', 'UNAVAILABLE'].includes(code)) {
+      this.store.updateMaterialAttempt(selectedAttempt.id, { state: 'failed', error: redact(error.message), error_code: code });
     }
 
     if (code === 'AUTH_REQUIRED') {
@@ -962,5 +984,10 @@ export class Queue {
   }
   retryMaterialTask(id) {
     return this.store.retryMaterialTask(id);
+  }
+  async restorePreviousMaterial(id) {
+    // Let a canceled in-flight command finish journaling before selecting the old result.
+    if (this.active) await this.active;
+    return this.store.restorePreviousMaterial(id);
   }
 }

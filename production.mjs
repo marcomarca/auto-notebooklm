@@ -17,6 +17,16 @@ export function hashParams(params) {
   return createHash('sha256').update(canonicalJson(params)).digest('hex');
 }
 
+function sameMaterialParams(task, params) {
+  try {
+    const previous = JSON.parse(task.params_json);
+    const desired = { ...params };
+    // Legacy hashes used insertion order and included scheduling, not content settings.
+    if (task.type === 'audio') { delete previous.mode; delete desired.mode; }
+    return hashParams(previous) === hashParams(desired);
+  } catch { return false; }
+}
+
 export const SUPPORTED_MATERIAL_TYPES = ['audio', 'infographic'];
 
 export const DEFAULT_RECIPES = {
@@ -93,10 +103,15 @@ export function previewProductionPlan({ store, bookId, recipeId = 'default-audio
 
       let status = 'to_create';
       let existingTaskId = currentTask?.id || null;
+      const previous = currentTask?.state === 'canceled' ? store.previousReadyMaterial(currentTask.id) : null;
 
       if (currentTask) {
-        if (currentTask.state === 'ready') {
-          if (currentTask.params_hash === paramsHash && currentTask.source_fingerprint === block.hash) {
+        if (previous) {
+          status = 'restore';
+          summary.ready++;
+        } else if (currentTask.state === 'ready') {
+          // Completing missing materials preserves existing audio; replacement is an explicit revision.
+          if (currentTask.source_fingerprint === block.hash && (type === 'audio' || sameMaterialParams(currentTask, params))) {
             status = 'ready';
             summary.ready++;
           } else {
@@ -104,7 +119,7 @@ export function previewProductionPlan({ store, bookId, recipeId = 'default-audio
             summary.outdated++;
           }
         } else if (['planned', 'queued', 'submitting', 'remote_pending', 'download_pending'].includes(currentTask.state)) {
-          if (currentTask.params_hash === paramsHash && currentTask.source_fingerprint === block.hash) {
+          if (sameMaterialParams(currentTask, params) && currentTask.source_fingerprint === block.hash) {
             status = 'reusable';
             summary.reusable++;
           } else {
@@ -151,6 +166,27 @@ export function previewProductionPlan({ store, bookId, recipeId = 'default-audio
   };
 }
 
+export function startProduction({ store, bookId, mode } = {}) {
+  return store.transaction(() => {
+    if (!store.book(bookId)) throw new Error('Libro inexistente.');
+    const changes = { running: 1 };
+    if (mode && ['immediate', 'later'].includes(mode)) changes.generation_mode = mode;
+    store.update('books', bookId, changes);
+    for (const task of store.materialTasks(bookId, { currentOnly: true })) {
+      if (task.state === 'planned' && !task.canceled_at) {
+        const block = store.block(task.block_id);
+        if (task.type === 'audio' && block?.source_id && (block.canceled_at || block.state === 'canceled')) {
+          store.update('blocks', block.id, { state: 'ready', stage: 'generate', artifact_id: null, baseline: null,
+            generation_profile: null, canceled_at: null, cancel_requested_at: null, cancel_reason: null,
+            error: null, error_code: null, attempts: 0, next_at: 0, output_path: null, original_path: null });
+        }
+        store.updateMaterialTask(task.id, { state: 'queued' });
+      }
+    }
+    return { ok: true, running: true };
+  });
+}
+
 export function confirmProductionPlan({ store, bookId, recipeId, recipeVersion, blockIds, requestId, expectedRevision } = {}) {
   if (!requestId || typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(requestId)) {
     throw new Error('requestId inválido para confirmar plan de producción.');
@@ -177,6 +213,7 @@ export function confirmProductionPlan({ store, bookId, recipeId, recipeVersion, 
         ok: true,
         idempotent: true,
         bookId,
+        running: !!store.book(bookId).running,
         tasks: existingTasks
       };
     }
@@ -193,7 +230,9 @@ export function confirmProductionPlan({ store, bookId, recipeId, recipeVersion, 
     const reusedTasks = [];
 
     for (const req of preview.requirements) {
-      if (req.status === 'to_create' || req.status === 'canceled') {
+      if (req.status === 'restore') {
+        reusedTasks.push(store.restorePreviousMaterial(req.existingTaskId));
+      } else if (req.status === 'to_create' || req.status === 'canceled') {
         const task = store.createMaterialTask({
           bookId,
           blockId: req.blockId,
@@ -221,10 +260,15 @@ export function confirmProductionPlan({ store, bookId, recipeId, recipeVersion, 
       reason: requestId
     });
 
+    const pending = store.materialTasks(bookId, { currentOnly: true }).some(task =>
+      !task.canceled_at && !['ready', 'canceled', 'failed', 'review_required'].includes(task.state));
+    if (pending) startProduction({ store, bookId });
+
     return {
       ok: true,
       idempotent: false,
       bookId,
+      running: !!store.book(bookId).running,
       recipeId: preview.recipeId,
       recipeVersion: preview.recipeVersion,
       createdCount: createdTasks.length,

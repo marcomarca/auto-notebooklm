@@ -6,6 +6,35 @@ import { join, resolve } from 'node:path';
 import { makeApp } from '../server.mjs';
 import { FakeProvider } from './helpers.mjs';
 
+test('confirmar un plan arranca el worker automáticamente aunque todos los audios estén terminados', { timeout: 10000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'auto-nlm-autostart-'));
+  let app;
+  t.after(async () => {
+    try { await app?.close(); } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+  const provider = new FakeProvider();
+  app = await makeApp({ port: 0, dataDir: dir, exportsDir: join(dir, 'exports'), provider, check: false });
+  const book = app.store.createBook({ title: 'Solo falta infografía', requestId: 'automatic-worker' }, 'default');
+  app.store.update('books', book.id, { remote_id: 'remote-automatic', state: 'ready' });
+  const block = app.store.addBlock(book.id, { requestId: 'automatic-block', title: 'Capítulo', filename: 'chapter.md', filePath: '', hash: 'chapter-hash' });
+  app.store.update('blocks', block.id, { source_id: 'chapter-source', state: 'done', stage: 'convert' });
+  const audio = app.store.createMaterialTask({ bookId: book.id, blockId: block.id, type: 'audio', sourceFingerprint: block.hash, state: 'ready' });
+  const res = await fetch(`${app.origin}/api/books/${book.id}/plan/confirm`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Local-Token': app.token },
+    body: JSON.stringify({ recipeId: 'study-book', requestId: 'automatic-confirm' })
+  });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).running, true);
+  const deadline = Date.now() + 5000;
+  while (!provider.calls.some(call => call[0] === 'generateInfographic') && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.equal(provider.calls.filter(call => call[0] === 'generateInfographic').length, 1);
+  assert.equal(provider.calls.filter(call => call[0] === 'generate').length, 0);
+  assert.equal(app.store.currentMaterialTask(block.id, 'audio').id, audio.id);
+  assert.equal(app.store.currentMaterialTask(block.id, 'audio').state, 'ready');
+});
+
 test('Fase 5: Estructura HTML y componentes multimodales en index.html', async () => {
   const html = await readFile(resolve('public/index.html'), 'utf8');
 
