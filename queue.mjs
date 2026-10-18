@@ -127,6 +127,14 @@ export class Queue {
     const matches = rows.filter(a => !before.includes(a.artifact_id || a.id) && a.type === 'audio' && a.source_ids?.length === 1 && a.source_ids[0] === block.source_id);
     if (matches.length !== 1) throw new ProviderError('REVIEW', 'No se pudo identificar un único audio de esta fuente. No se solicitará otro: comprueba el cuaderno y vuelve a consultar.');
     const artId = matches[0].artifact_id || matches[0].id;
+    const task = this.store.currentMaterialTask(block.id, 'audio');
+    if (task) {
+      const attempts = this.store.materialAttempts(task.id);
+      const lastAtt = attempts.at(-1);
+      if (lastAtt) {
+        this.store.updateMaterialAttempt(lastAtt.id, { artifact_id: artId, state: 'accepted' });
+      }
+    }
     if (block.cancel_requested_at || block.canceled_at) {
       this.store.update('blocks', block.id, {
         artifact_id: artId,
@@ -136,9 +144,25 @@ export class Queue {
         error: 'Cancelado localmente. La generación remota continuó en Google.',
         error_code: 'CANCELED'
       });
+      if (task) {
+        this.store.updateMaterialTask(task.id, {
+          state: 'canceled',
+          canceled_at: block.canceled_at || this.now(),
+          error: 'Cancelado localmente. La generación remota continuó en Google.',
+          error_code: 'CANCELED'
+        });
+      }
       return;
     }
     this.store.update('blocks', block.id, { artifact_id: artId, baseline: null, stage: 'poll', state: 'generating', attempts: 0, next_at: 0, error: null, error_code: null });
+    if (task) {
+      this.store.updateMaterialTask(task.id, {
+        state: 'remote_pending',
+        next_at: 0,
+        error: null,
+        error_code: null
+      });
+    }
   }
   async runBlock(book, block) {
     const initial = this.store.block(block.id);
@@ -214,6 +238,34 @@ export class Queue {
           (provider.profile !== book.profile && !this.store.get('SELECT profile FROM book_accounts WHERE book_id=? AND profile=?', book.id, provider.profile)))) return;
         this.store.update('books', book.id, { quota_at: 0, quota_error: null });
         this.store.update('blocks', block.id, { state: 'submitting', locked: 1, generation_profile: provider.profile, baseline: JSON.stringify(before), started_at: this.now() });
+        let task = this.store.currentMaterialTask(block.id, 'audio');
+        if (!task) {
+          task = this.store.createMaterialTask({
+            bookId: book.id,
+            blockId: block.id,
+            type: 'audio',
+            recipeId: book.recipe_id || 'default-audio',
+            recipeVersion: book.recipe_version || 1,
+            sourceFingerprint: block.hash,
+            params: { format: 'deep_dive', length: 'default', language: 'es-419', mode },
+            state: 'submitting'
+          });
+        }
+        const attemptNumber = (this.store.materialAttempts(task.id).length || 0) + 1;
+        const attempt = this.store.createMaterialAttempt({
+          taskId: task.id,
+          attemptNumber,
+          profile: provider.profile,
+          remoteNotebookId: book.remote_id,
+          sourceIds: [block.source_id],
+          baseline: before,
+          state: 'submitting'
+        });
+        this.store.updateMaterialTask(task.id, {
+          state: 'submitting',
+          selected_attempt_id: attempt.id
+        });
+
         const artifactId = await provider.generate(book.remote_id, block.source_id, { defer: isLater });
         const afterGen = this.store.block(block.id);
         if (afterGen.cancel_requested_at || afterGen.canceled_at) {
@@ -225,9 +277,22 @@ export class Queue {
             error: 'Cancelado localmente. La generación remota puede haber continuado en Google.',
             error_code: 'CANCELED'
           });
+          this.store.updateMaterialAttempt(attempt.id, { artifact_id: artifactId, state: 'accepted' });
+          this.store.updateMaterialTask(task.id, {
+            state: 'canceled',
+            canceled_at: afterGen.canceled_at || this.now(),
+            error: 'Cancelado localmente. La generación remota puede haber continuado en Google.',
+            error_code: 'CANCELED'
+          });
           return;
         }
         this.store.update('blocks', block.id, { artifact_id: artifactId, baseline: null, state: isLater ? 'deferred' : 'generating', stage: 'poll', attempts: 0, next_at: this.now() + 15000, error: null, error_code: null });
+        this.store.updateMaterialAttempt(attempt.id, { artifact_id: artifactId, state: 'accepted' });
+        this.store.updateMaterialTask(task.id, {
+          state: isLater ? 'deferred' : 'remote_pending',
+          selected_attempt_id: attempt.id,
+          next_at: this.now() + 15000
+        });
       } else if (block.stage === 'poll') {
         const rows = await provider.artifacts(book.remote_id, block.artifact_id);
         const audio = rows.find(a => (a.artifact_id || a.id) === block.artifact_id);
@@ -242,8 +307,16 @@ export class Queue {
           const dir = join(this.exportsDir, exportDirName(bookRow));
           const original = join(this.dataDir, 'audio', `${block.id}.m4a`);
           await mkdir(dir, { recursive: true }); await mkdir(join(this.dataDir, 'audio'), { recursive: true });
+          const outPath = target?.outputPath || join(dir, formatBlockOutputName(block, bookRow.numbering));
           this.store.update('blocks', block.id, { state: 'download', stage: 'download', next_at: 0, attempts: 0,
-            original_path: original, output_path: target?.outputPath || join(dir, formatBlockOutputName(block, bookRow.numbering)), error: null, error_code: null });
+            original_path: original, output_path: outPath, error: null, error_code: null });
+          const pollTask = this.store.currentMaterialTask(block.id, 'audio');
+          if (pollTask) {
+            this.store.updateMaterialTask(pollTask.id, {
+              state: 'download_pending',
+              output_path: outPath
+            });
+          }
         } else {
           const mode = block.generation_mode || book.generation_mode || 'immediate';
           const isLater = mode === 'later';
@@ -259,8 +332,22 @@ export class Queue {
       } else if (block.stage === 'convert') {
         await provider.convert(block.original_path, block.output_path, { signal: controller.signal });
         this.store.update('blocks', block.id, { state: 'done', next_at: 0, attempts: 0, error: null, error_code: null });
+        const convTask = this.store.currentMaterialTask(block.id, 'audio');
+        if (convTask) {
+          this.store.updateMaterialTask(convTask.id, {
+            state: 'ready',
+            output_path: block.output_path
+          });
+          if (convTask.selected_attempt_id) {
+            this.store.updateMaterialAttempt(convTask.selected_attempt_id, {
+              state: 'resolved',
+              resolved_at: this.now()
+            });
+          }
+        }
       }
     } catch (error) {
+      const task = this.store.currentMaterialTask(block.id, 'audio');
       if (error.code === 'ABORTED') {
         const cur = this.store.block(block.id);
         this.store.update('blocks', block.id, {
@@ -269,10 +356,29 @@ export class Queue {
           error: 'Operación cancelada localmente.',
           error_code: 'CANCELED'
         });
+        if (task) {
+          this.store.updateMaterialTask(task.id, {
+            state: 'canceled',
+            canceled_at: cur?.canceled_at || this.now(),
+            error: 'Operación cancelada localmente.',
+            error_code: 'CANCELED'
+          });
+        }
         return;
       }
       const current = this.store.block(block.id);
       if (block.baseline && current.baseline) error.uncertain = true;
+      if (task) {
+        let taskState = 'failed';
+        if (error.code === 'QUOTA') taskState = 'waiting_quota';
+        else if (error.code === 'AUTH_REQUIRED') taskState = 'waiting_auth';
+        else if (error.code === 'REVIEW') taskState = 'review_required';
+        this.store.updateMaterialTask(task.id, {
+          state: taskState,
+          error: redact(error.message),
+          error_code: error.code || 'PROVIDER'
+        });
+      }
       // Before dispatch there is no uncertain operation: a failed preflight can use a backup.
       if (this.accounts && current.stage === 'generate' && !current.baseline && ['AUTH_REQUIRED', 'TEMPORARY'].includes(error.code)) {
         this.store.update('accounts', provider.profile, { retry_at: this.now() + (error.code === 'TEMPORARY' ? 60000 : thirtyMinutes), error: redact(error.message), error_code: error.code });
@@ -313,6 +419,15 @@ export class Queue {
         : 'Cancelado localmente antes de enviar a Google.',
       error_code: 'CANCELED'
     });
+    const cancelTask = this.store.currentMaterialTask(id, 'audio');
+    if (cancelTask) {
+      this.store.updateMaterialTask(cancelTask.id, {
+        state: 'canceled',
+        canceled_at: now,
+        error: reason,
+        error_code: 'CANCELED'
+      });
+    }
     const controller = this.controllers.get(id);
     if (controller) {
       controller.abort();
