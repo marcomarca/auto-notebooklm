@@ -14,6 +14,7 @@ import { Queue } from './queue.mjs';
 import { Accounts, profileId } from './accounts.mjs';
 import { syncNotebook } from './sync.mjs';
 import { validateRecipe, previewProductionPlan, confirmProductionPlan } from './production.mjs';
+import { createDelivery, listDeliveries, getDelivery } from './delivery.mjs';
 import { version as appVersion, mode, dataDir as defaultDataDir, exportsDir as defaultExportsDir } from './runtime.mjs';
 
 export function openInExplorer(targetPath) {
@@ -453,6 +454,47 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
           const editorialState = url.searchParams.get('editorialState') || undefined;
           const result = store.materialMatrix(book.id, { page, limit, type, state, editorialState });
           return send(res, 200, result);
+        }
+        if (parts[3] === 'exports') {
+          if (parts.length === 4 && req.method === 'GET') {
+            const deliveries = await listDeliveries({ exportsDir, bookId: book.id });
+            return send(res, 200, { ok: true, deliveries });
+          }
+          if (parts.length === 4 && req.method === 'POST') {
+            const payload = req.headers['content-length'] > 0 ? await body(req).catch(() => ({})) : {};
+            try {
+              const result = await createDelivery({
+                store,
+                bookId: book.id,
+                exportsDir,
+                provider,
+                options: {
+                  requireApproved: payload?.requireApproved === true,
+                  allowPartial: payload?.allowPartial === true,
+                  requestId: payload?.requestId
+                }
+              });
+              return send(res, 201, result);
+            } catch (err) {
+              if (err.code === 'INCOMPLETE_DELIVERY' || err.code === 'APPROVAL_REQUIRED') {
+                return send(res, 400, {
+                  error: err.message,
+                  code: err.code,
+                  missing: err.missing || [],
+                  unapproved: err.unapproved || []
+                });
+              }
+              throw err;
+            }
+          }
+          if (parts.length === 5 && req.method === 'GET') {
+            try {
+              const delivery = await getDelivery({ exportsDir, bookId: book.id, deliveryId: parts[4] });
+              return send(res, 200, { ok: true, delivery });
+            } catch (err) {
+              return send(res, 404, { error: 'Entrega no encontrada.' });
+            }
+          }
         }
         if (parts[3] === 'accounts' && req.method === 'PUT') {
           await accounts.configure(book, (await body(req)).profiles); return send(res, 200, { ok: true });
