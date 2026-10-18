@@ -15,6 +15,7 @@ import { Accounts, profileId } from './accounts.mjs';
 import { syncNotebook } from './sync.mjs';
 import { validateRecipe, previewProductionPlan, confirmProductionPlan } from './production.mjs';
 import { createDelivery, listDeliveries, getDelivery } from './delivery.mjs';
+import { createBackup, validateBackup, restoreBackup } from './backup.mjs';
 import { version as appVersion, mode, dataDir as defaultDataDir, exportsDir as defaultExportsDir } from './runtime.mjs';
 
 export function openInExplorer(targetPath) {
@@ -367,6 +368,27 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
           ok: true,
           recipe: { ...created, config: JSON.parse(created.config_json) }
         });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/backup') {
+        const payload = req.headers['content-length'] > 0 ? await body(req).catch(() => ({})) : {};
+        const targetDir = payload?.targetDir || join(exportsDir, 'backups', `backup-${Date.now()}`);
+        const result = await createBackup({
+          store,
+          dataDir,
+          exportsDir,
+          targetBackupDir: targetDir
+        });
+        return send(res, 201, result);
+      }
+      if (req.method === 'POST' && url.pathname === '/api/backup/validate') {
+        const { backupDir } = await body(req);
+        if (!backupDir) return send(res, 400, { error: 'backupDir es requerido.' });
+        try {
+          const result = await validateBackup(backupDir);
+          return send(res, 200, result);
+        } catch (err) {
+          return send(res, 400, { error: err.message, valid: false });
+        }
       }
       if (req.method === 'GET' && url.pathname === '/api/library/search') {
         const q = (url.searchParams.get('q') || '').trim().toLowerCase();
