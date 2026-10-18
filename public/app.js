@@ -1,10 +1,32 @@
 const $ = id => document.getElementById(id);
 const labels = { pending:'Pendiente', creating:'Creando libro', ready:'Fuente lista', upload_pending:'Por cargar', uploading:'Cargando fuente', source_processing:'Procesando fuente', submitting:'Solicitando audio', queued:'En cola de Google', deferred:'En cola diferida (ahorra cuota)', generating:'Generando', download:'Descargando', convert:'Convirtiendo a MP3', done:'MP3 listo', quota:'Esperando cuota (Generar más tarde)', review:'Revisión necesaria', auth:'Iniciar sesión', error:'Error', canceled:'Cancelado' };
+const materialLabels = {
+  planned: 'Planeado',
+  queued: 'En cola',
+  submitting: 'Enviando a Google',
+  remote_pending: 'Google procesando',
+  download_pending: 'Descarga pendiente',
+  downloading: 'Descargando',
+  ready: 'Listo',
+  waiting_quota: 'Esperando cuota',
+  waiting_auth: 'Esperando sesión',
+  retry_wait: 'Reintentando',
+  review_required: 'Revisión requerida',
+  failed: 'Fallido',
+  canceled: 'Cancelado'
+};
+const editorialLabels = {
+  unreviewed: 'Sin revisar',
+  approved: 'Aprobado',
+  rejected: 'Rechazado'
+};
 let token, books = [], selected = localStorage.getItem('selected-book'), uploading = false, lastRender = '', refreshing = false;
 let createRequest = crypto.randomUUID();
 let accountData = { accounts: [] }, accountStamp = '', backupStamp = '', savingBackups = false;
 let viewingExplorer = false, remoteBooks = [], selectedRemoteId = null, remoteDetail = null, selectedArtifacts = new Set(), explorerProfile = null, explorerSeq = 0;
 let currentCatalog = null, selectedCatalogSources = new Set(), selectedCatalogArtifacts = new Set(), activeCatalogTab = 'artifacts', pendingDeleteTarget = null;
+let recipes = [], activeViewTab = 'matrix', currentMatrix = null, currentPlanPreview = null;
+let librarySearchQuery = '', libraryPage = 1, libraryTotal = 0, searchDebounce = null;
 const date = t => new Intl.DateTimeFormat('es-BO', { dateStyle:'medium', timeStyle:'short', timeZone:'America/La_Paz' }).format(t);
 
 function el(tag, attrs = {}, text) {
@@ -62,8 +84,12 @@ async function refresh() {
         if (changed) renderRemoteDetail();
       }
     }
-    if (!viewingExplorer && selected && (!currentCatalog || currentCatalog.bookId !== selected)) {
-      loadCatalog(selected);
+    if (!recipes.length) loadRecipes();
+    if (!viewingExplorer && selected) {
+      if (!currentCatalog || currentCatalog.bookId !== selected) {
+        loadCatalog(selected);
+      }
+      loadMatrix(selected);
     }
     render();
   } catch(e) { notice(`No se pudo conectar a la aplicación. ${e.message}`, true); }
@@ -79,8 +105,11 @@ function renderAccounts() {
     const remaining = windows.filter(w => typeof w.percent_remaining === 'number').map(w => w.percent_remaining);
     const isLoggingIn = accountData.loginProfile === a.id;
     const status = isLoggingIn ? 'Iniciando sesión en el navegador…' : h.ready ? 'Sesión comprobada' : h.errorCode === 'AUTH_REQUIRED' ? 'Sesión expirada' : 'Sesión sin confirmar';
+    const emailLabel = a.email ? `Identidad: ${a.email}` : 'Identidad no verificada';
+    const quotaLabel = remaining.length ? `Cuota mínima restante: ${Math.min(...remaining)}%` : (isLoggingIn ? '' : 'Cuota: no disponible (desconocida)');
     card.append(el('strong', {}, `${a.id}${a.id === accountData.current ? ' · Para nuevos libros' : ''}`),
-      el('small', {}, a.email || 'Sin cuenta guardada'), el('small', {}, `${status}${remaining.length ? ` · Cuota mínima restante: ${Math.min(...remaining)}%` : isLoggingIn ? '' : ' · Cuota sin confirmar'}`));
+      el('small', {}, emailLabel),
+      el('small', {}, `${status} · ${quotaLabel}`));
     if (isLoggingIn) {
       card.append(el('small', { class: 'block-hint' }, 'Completa el inicio de sesión en la ventana de Chrome que se ha abierto.'));
     } else if (a.error || h.error) {
@@ -138,6 +167,7 @@ function choose(id) {
   lastRender = '';
   render();
   loadCatalog(id);
+  loadMatrix(id);
 }
 
 async function openExplorer() {
@@ -392,10 +422,27 @@ function render() {
   renderPermanentFeedback();
   if (document.activeElement?.classList.contains('block-title')) return;
   const book = books.find(b=>b.id === selected);
-  const stamp = JSON.stringify({ books, selected, uploading, viewingExplorer, profiles: accountData.accounts.map(a => [a.id, a.email]) });
+  const stamp = JSON.stringify({ books, selected, uploading, viewingExplorer, profiles: accountData.accounts.map(a => [a.id, a.email]), librarySearchQuery, libraryPage, activeViewTab });
   if (stamp === lastRender) return;
   lastRender = stamp;
-  $('library').replaceChildren(...books.map(b => {
+
+  const filteredBooks = books.filter(b => {
+    if (!librarySearchQuery) return true;
+    const q = librarySearchQuery.toLowerCase();
+    return (b.title && b.title.toLowerCase().includes(q)) || (b.profile && b.profile.toLowerCase().includes(q));
+  });
+  const pageSize = 8;
+  libraryTotal = filteredBooks.length;
+  const maxPage = Math.max(1, Math.ceil(libraryTotal / pageSize));
+  if (libraryPage > maxPage) libraryPage = maxPage;
+  const pagedBooks = filteredBooks.slice((libraryPage - 1) * pageSize, libraryPage * pageSize);
+  const pageIndicator = $('library-page-info') || $('library-page-indicator');
+  if (pageIndicator) pageIndicator.textContent = `${libraryPage} de ${maxPage}`;
+  if ($('library-pagination')) $('library-pagination').hidden = maxPage <= 1;
+  if ($('library-prev-page')) $('library-prev-page').disabled = libraryPage <= 1;
+  if ($('library-next-page')) $('library-next-page').disabled = libraryPage >= maxPage;
+
+  $('library').replaceChildren(...pagedBooks.map(b => {
     const button = el('button',{class:`book-button${!viewingExplorer && b.id === selected ? ' active' : ''}`,onclick:()=>{ viewingExplorer=false; choose(b.id); }},b.title);
     button.append(el('small',{},`Cuenta: ${b.profile} · ${b.blocks.filter(x=>x.state === 'done').length} de ${b.blocks.length} audios listos`));
     return button;
@@ -425,6 +472,8 @@ function render() {
     $('sync-content-btn').hidden = true;
     $('cancel-pending-btn').hidden = true;
     $('catalog-section').hidden = true;
+    $('material-metrics-bar').hidden = true;
+    $('waiting-reason-box').hidden = true;
     return;
   }
   $('book-meta-info').hidden = false;
@@ -441,6 +490,21 @@ function render() {
   $('sync-content-btn').hidden = !book.remoteId;
   $('cancel-pending-btn').hidden = !book.remoteId;
   renderBackups(book);
+  renderRecipes();
+
+  if (activeViewTab === 'matrix') {
+    $('matrix-section').hidden = false;
+    $('blocks-section').hidden = true;
+    $('tab-view-matrix').className = 'tab-btn active';
+    $('tab-view-blocks').className = 'tab-btn';
+    renderMatrix();
+  } else {
+    $('matrix-section').hidden = true;
+    $('blocks-section').hidden = false;
+    $('tab-view-matrix').className = 'tab-btn';
+    $('tab-view-blocks').className = 'tab-btn active';
+  }
+
   const status = $('book-status'); status.replaceChildren();
   if (!book.remoteId) {
     status.append(el('span',{},book.error || labels[book.state] || book.state));
@@ -949,6 +1013,330 @@ $('delete-modal-form')?.addEventListener('submit', async (e) => {
 $('delete-modal-cancel')?.addEventListener('click', () => {
   pendingDeleteTarget = null;
   $('delete-modal').close();
+});
+
+async function loadRecipes() {
+  try {
+    const res = await api('/api/recipes');
+    recipes = res.recipes || [];
+    renderRecipes();
+  } catch (e) {
+    console.error('Error cargando recetas:', e);
+  }
+}
+
+function renderRecipes() {
+  const sel = $('recipe-selector');
+  if (!sel) return;
+  const currentVal = sel.value;
+  sel.replaceChildren(...recipes.map(r => {
+    const opt = el('option', { value: r.id }, `${r.name} (v${r.version || 1})`);
+    return opt;
+  }));
+  if (currentVal && recipes.some(r => r.id === currentVal)) {
+    sel.value = currentVal;
+  }
+  const hasBook = !!selected;
+  if ($('prepare-plan-btn')) $('prepare-plan-btn').disabled = !hasBook || !recipes.length;
+}
+
+async function loadMatrix(bookId) {
+  if (!bookId) {
+    currentMatrix = null;
+    return;
+  }
+  try {
+    const data = await api(`/api/books/${bookId}/matrix`);
+    currentMatrix = data;
+    renderMatrix();
+  } catch (e) {
+    currentMatrix = null;
+  }
+}
+
+function renderMatrix() {
+  if (activeViewTab !== 'matrix' || !selected) return;
+  const bar = $('material-metrics-bar');
+  const reasonBox = $('waiting-reason-box');
+  const tbody = $('matrix-body');
+  const empty = $('empty-matrix');
+
+  if (!currentMatrix || !currentMatrix.matrix || !currentMatrix.matrix.length) {
+    if (empty) empty.hidden = false;
+    if (tbody) tbody.replaceChildren();
+    if (bar) bar.hidden = true;
+    if (reasonBox) reasonBox.hidden = true;
+    return;
+  }
+
+  if (empty) empty.hidden = true;
+  if (bar) {
+    bar.hidden = false;
+    const s = currentMatrix.summary || {};
+    $('metric-required').textContent = s.totalRequirements || 0;
+    $('metric-ready').textContent = s.ready || 0;
+    $('metric-approved').textContent = s.approved || 0;
+    $('metric-waiting').textContent = s.waiting || 0;
+    $('metric-outdated').textContent = s.outdated || 0;
+    $('metric-issues').textContent = (s.failed || 0) + (s.reviewRequired || 0);
+  }
+
+  const book = books.find(b => b.id === selected);
+  if (reasonBox) {
+    const waitingReason = currentMatrix.waitingReason || (book?.quotaError ? `Esperando cuota en ${book.profile || 'cuenta principal'}: ${book.quotaError}` : null);
+    if (waitingReason) {
+      reasonBox.hidden = false;
+      reasonBox.textContent = `⏳ ${waitingReason}`;
+    } else {
+      reasonBox.hidden = true;
+    }
+  }
+
+  tbody.replaceChildren(...currentMatrix.matrix.map(row => {
+    const tr = el('tr');
+    tr.dataset.blockId = row.blockId;
+
+    const tdNum = el('td', {}, el('span', { class: 'number' }, String(row.blockNumber).padStart(2, '0')));
+    const tdTitle = el('td');
+    tdTitle.append(el('strong', {}, row.title || `Bloque ${row.blockNumber}`));
+    if (row.sourceId) tdTitle.append(el('div', { class: 'source-name' }, `Fuente: ${row.sourceId}`));
+
+    const tdAudio = el('td');
+    tdAudio.append(renderMaterialCell(row.materials?.audio, row, 'audio'));
+
+    const tdInfo = el('td');
+    tdInfo.append(renderMaterialCell(row.materials?.infographic, row, 'infographic'));
+
+    tr.append(tdNum, tdTitle, tdAudio, tdInfo);
+    return tr;
+  }));
+}
+
+function renderMaterialCell(mat, row, kind) {
+  const container = el('div', { class: 'material-cell' });
+  if (!mat) {
+    container.append(el('span', { class: 'muted' }, '—'));
+    return container;
+  }
+
+  const badgeRow = el('div', { class: 'badge-row' });
+  const isPulsing = ['submitting', 'remote_pending', 'download_pending', 'downloading'].includes(mat.state);
+  const stBadge = el('span', { class: `badge ${mat.state}${isPulsing ? ' active-pulse' : ''}` });
+  if (isPulsing) {
+    stBadge.append(el('span', { class: 'mini-dot' }), document.createTextNode(` ${materialLabels[mat.state] || mat.state}…`));
+  } else {
+    stBadge.textContent = materialLabels[mat.state] || mat.state;
+  }
+  badgeRow.append(stBadge);
+
+  if (mat.editorial_state) {
+    const edBadge = el('span', { class: `editorial-badge ${mat.editorial_state}` }, editorialLabels[mat.editorial_state] || mat.editorial_state);
+    badgeRow.append(edBadge);
+  }
+  container.append(badgeRow);
+
+  if (mat.assigned_profile) {
+    container.append(el('small', { class: 'account-tag' }, `Cuenta: ${mat.assigned_profile}`));
+  }
+
+  if (mat.error_reason) {
+    container.append(el('div', { class: 'block-error' }, mat.error_reason));
+  }
+
+  if (mat.state === 'ready') {
+    if (kind === 'audio' && mat.output_path) {
+      const audioUrl = `/api/downloads/${mat.download_job_id || mat.id}/file`;
+      container.append(el('audio', { controls: true, preload: 'none', src: audioUrl }));
+    } else if (kind === 'infographic' && mat.output_path) {
+      const imgUrl = `/api/downloads/${mat.download_job_id || mat.id}/file`;
+      const imgLink = el('a', { href: `${imgUrl}?download=1`, target: '_blank', class: 'download-link' }, '👁️ Ver infografía (PNG)');
+      container.append(imgLink);
+    }
+  }
+
+  const actions = el('div', { class: 'cell-actions' });
+  if (mat.state === 'ready') {
+    if (mat.editorial_state !== 'approved') {
+      actions.append(el('button', {
+        class: 'quiet link-button action-btn',
+        onclick: () => act(async () => {
+          await api(`/api/materials/${mat.id}/action`, { method: 'POST', data: { action: 'approve' } });
+          notice('Material aprobado.');
+          await loadMatrix(selected);
+        })
+      }, 'Aprobar'));
+    }
+    if (mat.editorial_state !== 'rejected') {
+      actions.append(el('button', {
+        class: 'quiet retry action-btn',
+        onclick: () => act(async () => {
+          await api(`/api/materials/${mat.id}/action`, { method: 'POST', data: { action: 'reject' } });
+          notice('Material rechazado.');
+          await loadMatrix(selected);
+        })
+      }, 'Rechazar'));
+    }
+  }
+
+  if (['failed', 'review_required'].includes(mat.state) || mat.editorial_state === 'rejected') {
+    actions.append(el('button', {
+      class: 'quiet retry action-btn',
+      onclick: () => act(async () => {
+        await api(`/api/materials/${mat.id}/action`, { method: 'POST', data: { action: 'retry' } });
+        notice('Reintento solicitado.');
+        await loadMatrix(selected);
+      })
+    }, 'Reintentar'));
+  }
+
+  if (mat.editorial_state === 'rejected' || mat.state === 'ready') {
+    actions.append(el('button', {
+      class: 'quiet link-button action-btn',
+      onclick: () => act(async () => {
+        await api(`/api/materials/${mat.id}/action`, { method: 'POST', data: { action: 'revision' } });
+        notice('Nueva revisión creada.');
+        await loadMatrix(selected);
+      })
+    }, 'Nueva revisión'));
+  }
+
+  if (!['ready', 'failed', 'canceled'].includes(mat.state)) {
+    actions.append(el('button', {
+      class: 'quiet retry action-btn',
+      onclick: () => act(async () => {
+        await api(`/api/materials/${mat.id}/action`, { method: 'POST', data: { action: 'cancel' } });
+        notice('Tarea cancelada.');
+        await loadMatrix(selected);
+      })
+    }, 'Cancelar'));
+  }
+
+  if (actions.children.length) container.append(actions);
+  return container;
+}
+
+async function openPlanPreview() {
+  if (!selected) return;
+  const recipeId = $('recipe-selector')?.value || 'study-book';
+  notice('Calculando plan de producción multimodal…');
+  try {
+    const plan = await api(`/api/books/${selected}/plan/preview`, {
+      method: 'POST',
+      data: { recipeId }
+    });
+    currentPlanPreview = plan;
+    renderPlanModal(plan);
+    $('plan-modal').showModal();
+    notice('');
+  } catch (e) {
+    notice(`Error al calcular plan: ${e.message}`, true);
+  }
+}
+
+function renderPlanModal(plan) {
+  const summaryEl = $('plan-modal-summary');
+  const detailsEl = $('plan-modal-details');
+  if (!summaryEl || !detailsEl) return;
+
+  const s = plan.summary || {};
+  summaryEl.innerHTML = `
+    <div class="summary-card"><strong>${escapeHtml(plan.recipe?.name || 'Receta')}</strong><small>Receta seleccionada</small></div>
+    <div class="summary-card"><strong>${s.total || 0}</strong><small>Total tareas estimadas</small></div>
+    <div class="summary-card"><strong>${s.audio || 0}</strong><small>Audios a planear</small></div>
+    <div class="summary-card"><strong>${s.infographic || 0}</strong><small>Infografías a planear</small></div>
+    <div class="summary-card"><strong>${s.existing || 0}</strong><small>Ya existentes (omitidas)</small></div>
+  `;
+
+  const tasks = plan.tasks || [];
+  if (!tasks.length) {
+    detailsEl.innerHTML = '<p class="muted">Todos los materiales requeridos para los bloques existentes ya están planificados o completados.</p>';
+  } else {
+    detailsEl.innerHTML = `
+      <p><strong>Hash de sincronización canónico:</strong> <code>${escapeHtml(plan.canonicalHash)}</code></p>
+      <div class="table-wrap" style="max-height: 240px; overflow-y: auto;">
+        <table>
+          <thead>
+            <tr><th>#</th><th>Material</th><th>Título del bloque</th><th>Motivo</th></tr>
+          </thead>
+          <tbody>
+            ${tasks.map(t => `
+              <tr>
+                <td>${t.blockNumber}</td>
+                <td><span class="badge ${t.kind}">${t.kind}</span></td>
+                <td>${escapeHtml(t.title)}</td>
+                <td><small>${escapeHtml(t.reason || 'Nuevo requisito')}</small></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+}
+
+async function confirmPlan() {
+  if (!selected || !currentPlanPreview) return;
+  $('plan-modal-confirm').disabled = true;
+  notice('Confirmando plan de producción…');
+  try {
+    const res = await api(`/api/books/${selected}/plan/confirm`, {
+      method: 'POST',
+      data: {
+        recipeId: currentPlanPreview.recipe?.id,
+        recipeVersion: currentPlanPreview.recipe?.version,
+        requestId: crypto.randomUUID()
+      }
+    });
+    $('plan-modal').close();
+    notice(`Plan confirmado. ${res.createdCount || 0} nuevas tareas de material preparadas.`);
+    currentPlanPreview = null;
+    await refresh();
+    await loadMatrix(selected);
+  } catch (e) {
+    notice(`Error al confirmar plan: ${e.message}`, true);
+  } finally {
+    $('plan-modal-confirm').disabled = false;
+  }
+}
+
+$('prepare-plan-btn')?.addEventListener('click', openPlanPreview);
+$('plan-modal-confirm')?.addEventListener('click', confirmPlan);
+$('plan-modal-cancel')?.addEventListener('click', () => {
+  $('plan-modal').close();
+  currentPlanPreview = null;
+});
+
+$('tab-view-matrix')?.addEventListener('click', () => {
+  activeViewTab = 'matrix';
+  lastRender = '';
+  render();
+});
+$('tab-view-blocks')?.addEventListener('click', () => {
+  activeViewTab = 'blocks';
+  lastRender = '';
+  render();
+});
+
+$('library-search-input')?.addEventListener('input', e => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => {
+    librarySearchQuery = e.target.value.trim();
+    libraryPage = 1;
+    lastRender = '';
+    render();
+  }, 200);
+});
+$('library-prev-page')?.addEventListener('click', () => {
+  if (libraryPage > 1) {
+    libraryPage--;
+    lastRender = '';
+    render();
+  }
+});
+$('library-next-page')?.addEventListener('click', () => {
+  libraryPage++;
+  lastRender = '';
+  render();
 });
 
 refresh(); setInterval(refresh,2000);

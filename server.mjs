@@ -402,7 +402,7 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
       if (parts[0] === 'api' && parts[1] === 'books' && parts[2]) {
         const book = store.book(parts[2]);
         if (!book) return send(res, 404, { error: 'Libro inexistente.' });
-        if (parts[3] === 'production') {
+        if (parts[3] === 'production' || parts[3] === 'plan') {
           if (parts[4] === 'preview' && req.method === 'POST') {
             const payload = req.headers['content-length'] > 0 ? await body(req).catch(() => ({})) : {};
             const preview = previewProductionPlan({
@@ -414,7 +414,7 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
             });
             return send(res, 200, { ok: true, ...preview });
           }
-          if (parts[4] === 'plan' && req.method === 'POST') {
+          if ((parts[4] === 'plan' || parts[4] === 'confirm') && req.method === 'POST') {
             const payload = await body(req);
             try {
               const confirmed = confirmProductionPlan({
@@ -445,7 +445,7 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
             return send(res, 200, { ok: true, running });
           }
         }
-        if (parts[3] === 'materials' && req.method === 'GET') {
+        if ((parts[3] === 'materials' || parts[3] === 'matrix') && req.method === 'GET') {
           const page = Number(url.searchParams.get('page')) || 1;
           const limit = Number(url.searchParams.get('limit')) || 50;
           const type = url.searchParams.get('type') || undefined;
