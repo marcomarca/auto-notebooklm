@@ -95,7 +95,7 @@ export class Queue {
     if (next) return this.runBlock(next.book, next.block);
 
     // 8. Dispatch next non-audio material task (e.g. infographic)
-    const matGen = this.store.get("SELECT t.* FROM material_tasks t JOIN books b ON t.book_id=b.id JOIN blocks bl ON t.block_id=bl.id WHERE t.is_current=1 AND t.type != 'audio' AND t.state IN ('planned', 'queued') AND b.running=1 AND bl.source_id IS NOT NULL AND bl.source_id != '' AND t.next_at <= ? ORDER BY t.priority DESC, t.created_at ASC LIMIT 1", now);
+    const matGen = this.store.get("SELECT t.* FROM material_tasks t JOIN books b ON t.book_id=b.id JOIN blocks bl ON t.block_id=bl.id WHERE t.is_current=1 AND t.type != 'audio' AND t.state IN ('planned', 'queued') AND b.running=1 AND (b.quota_at IS NULL OR b.quota_at <= ?) AND bl.source_id IS NOT NULL AND bl.source_id != '' AND t.next_at <= ? ORDER BY t.priority DESC, t.created_at ASC LIMIT 1", now, now);
     if (matGen) return this.runMaterialTask(matGen);
 
     for (const b of books.filter(b => b.running)) {
@@ -170,6 +170,9 @@ export class Queue {
       return;
     }
     this.store.update('blocks', block.id, { artifact_id: artId, baseline: null, stage: 'poll', state: 'generating', attempts: 0, next_at: 0, error: null, error_code: null });
+    if (book.quota_error?.includes('inciert') || book.quota_error?.includes('Barrera')) {
+      this.store.update('books', book.id, { quota_at: 0, quota_error: null });
+    }
     if (task) {
       this.store.updateMaterialTask(task.id, {
         state: 'remote_pending',
@@ -220,6 +223,11 @@ export class Queue {
         const isLater = mode === 'later';
         if (this.accounts) {
           const candidate = await this.accounts.candidate(book, block.source_id);
+          if (candidate.barrier) {
+            this.store.update('books', book.id, { quota_at: candidate.retryAt, quota_error: 'Barrera de generación incierta activa.' });
+            this.store.update('blocks', block.id, { next_at: candidate.retryAt });
+            return;
+          }
           if (!candidate.provider && !isLater) return this.defer(book, block, candidate.retryAt, 'No hay una cuenta habilitada con sesión, acceso y cuota disponibles. Se comprobará automáticamente.');
           if (candidate.provider) provider = candidate.provider;
         }
@@ -393,12 +401,23 @@ export class Queue {
           error: redact(error.message),
           error_code: error.code || 'PROVIDER'
         });
+        if (task.selected_attempt_id && !error.uncertain) {
+          this.store.updateMaterialAttempt(task.selected_attempt_id, {
+            state: 'failed',
+            error: redact(error.message),
+            error_code: error.code || 'PROVIDER',
+            resolved_at: this.now()
+          });
+        }
       }
       // Before dispatch there is no uncertain operation: a failed preflight can use a backup.
       if (this.accounts && current.stage === 'generate' && !current.baseline && ['AUTH_REQUIRED', 'TEMPORARY'].includes(error.code)) {
         this.store.update('accounts', provider.profile, { retry_at: this.now() + (error.code === 'TEMPORARY' ? 60000 : thirtyMinutes), error: redact(error.message), error_code: error.code });
         if (error.code === 'AUTH_REQUIRED') provider.health = { ...provider.health, ready: false, auth: false, error: redact(error.message), errorCode: error.code };
         this.store.update('blocks', block.id, { state: 'ready', generation_profile: null, next_at: 0, error: null, error_code: null, attempts: 0 });
+        if (task) {
+          this.store.updateMaterialTask(task.id, { state: 'queued', selected_attempt_id: null, error: null, error_code: null });
+        }
         return;
       }
       if (error.code === 'QUOTA' && !error.uncertain && current.stage === 'generate') {
@@ -407,6 +426,9 @@ export class Queue {
         if (this.accounts) {
           this.accounts.exhausted(provider.profile, quotaRetry(usage, this.now()) || this.now() + thirtyMinutes, redact(error.message));
           this.store.update('blocks', block.id, { state: 'ready', generation_profile: null, next_at: 0, attempts: 0, error: null, error_code: null });
+          if (task) {
+            this.store.updateMaterialTask(task.id, { state: 'queued', selected_attempt_id: null, error: null, error_code: null });
+          }
           return;
         }
         return this.defer(book, current, quotaRetry(usage, this.now()) || this.now() + thirtyMinutes, redact(error.message));
@@ -673,7 +695,38 @@ export class Queue {
       } else if (task.state === 'remote_pending') {
         const attempts = this.store.materialAttempts(task.id);
         const lastAttempt = attempts.at(-1);
-        const artifactId = lastAttempt?.artifact_id || task.selected_remote_item_id;
+        let artifactId = lastAttempt?.artifact_id || task.selected_remote_item_id;
+        if (!artifactId && lastAttempt?.baseline_json) {
+          const before = JSON.parse(lastAttempt.baseline_json);
+          const currentArtifacts = await provider.artifacts(book.remote_id);
+          const matches = currentArtifacts.filter(a =>
+            !before.includes(a.artifact_id || a.id) &&
+            a.type === task.type &&
+            Array.isArray(a.source_ids) &&
+            a.source_ids.includes(block.source_id)
+          );
+          if (matches.length === 1) {
+            artifactId = matches[0].artifact_id || matches[0].id;
+            this.store.updateMaterialAttempt(lastAttempt.id, {
+              artifact_id: artifactId,
+              state: 'accepted'
+            });
+            if (book.quota_error?.includes('inciert') || book.quota_error?.includes('Barrera')) {
+              this.store.update('books', book.id, { quota_at: 0, quota_error: null });
+            }
+          } else if (matches.length > 1) {
+            throw new ProviderError('REVIEW', 'Múltiples artefactos nuevos detectados tras reconciliación. Revisión requerida.');
+          } else {
+            const nextAt = this.now() + 15000;
+            this.store.updateMaterialTask(task.id, {
+              state: 'remote_pending',
+              next_at: nextAt,
+              error: 'Esperando propagación del artefacto generado en NotebookLM.',
+              error_code: 'TEMPORARY'
+            });
+            return;
+          }
+        }
         if (!artifactId) throw new ProviderError('REJECTED', 'Falta el ID del artefacto.');
 
         const rows = await provider.artifacts(book.remote_id, artifactId);
@@ -759,6 +812,15 @@ export class Queue {
         // 3. Multi-account candidate check
         if (this.accounts) {
           const candidate = await this.accounts.candidate(book, block.source_id);
+          if (candidate.barrier) {
+            this.store.updateMaterialTask(task.id, {
+              next_at: candidate.retryAt,
+              error: 'Cuaderno con generación previa en estado incierto. Esperando reconciliación.',
+              error_code: 'BARRIER'
+            });
+            this.store.update('books', book.id, { quota_at: candidate.retryAt, quota_error: 'Barrera de generación incierta activa.' });
+            return;
+          }
           if (!candidate.provider) {
             this.store.updateMaterialTask(task.id, {
               state: 'waiting_quota',

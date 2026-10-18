@@ -135,26 +135,106 @@ export class Accounts {
     });
   }
   async candidate(book, sourceId) {
-    const profiles = [book.profile, ...this.store.all('SELECT profile FROM book_accounts WHERE book_id=? ORDER BY profile', book.id).map(a => a.profile)];
+    const hasUncertainBlock = this.store.get(
+      'SELECT id FROM blocks WHERE book_id=? AND baseline IS NOT NULL LIMIT 1',
+      book.id
+    );
+    const hasUncertainMaterial = this.store.get(
+      `SELECT ma.id FROM material_attempts ma
+       JOIN material_tasks mt ON ma.task_id = mt.id
+       WHERE mt.book_id = ? AND ma.baseline_json IS NOT NULL AND ma.resolved_at IS NULL AND ma.state NOT IN ('failed', 'canceled', 'resolved') AND ma.artifact_id IS NULL
+       LIMIT 1`,
+      book.id
+    );
+    if (hasUncertainBlock || hasUncertainMaterial) {
+      return { barrier: true, retryAt: this.now() + 15000 };
+    }
+
+    const rawProfiles = [book.profile, ...this.store.all('SELECT profile FROM book_accounts WHERE book_id=? ORDER BY profile', book.id).map(a => a.profile)];
+    const seenEmails = new Set();
+    const candidateProfiles = [];
+    for (const id of rawProfiles) {
+      const a = this.ensure(id);
+      if (!a.enabled) continue;
+      let email = a.email ? a.email.trim().toLowerCase() : null;
+      if (!email && id !== book.profile) {
+        const p = this.get(id);
+        if (p.profiles) {
+          try {
+            const list = await p.profiles();
+            const me = list.find(x => x.id === id);
+            if (me?.email) {
+              email = me.email.trim().toLowerCase();
+              a.email = me.email;
+              this.store.update('accounts', id, { email: me.email });
+            }
+          } catch {}
+        }
+      }
+      if (email) {
+        if (seenEmails.has(email)) continue;
+        seenEmails.add(email);
+      } else if (id !== book.profile) {
+        continue;
+      }
+      candidateProfiles.push(id);
+    }
+
+    if (!candidateProfiles.length) {
+      return { retryAt: this.now() + 1800000 };
+    }
+
+    const lastProfileKey = `book_last_profile:${book.id}`;
+    const lastProfile = this.store.get('SELECT value FROM settings WHERE key=?', lastProfileKey)?.value;
+    let startIndex = 0;
+    if (lastProfile) {
+      const lastIdx = candidateProfiles.indexOf(lastProfile);
+      if (lastIdx !== -1) {
+        startIndex = (lastIdx + 1) % candidateProfiles.length;
+      }
+    }
+
+    const orderedProfiles = [];
+    for (let i = 0; i < candidateProfiles.length; i++) {
+      orderedProfiles.push(candidateProfiles[(startIndex + i) % candidateProfiles.length]);
+    }
+
     let earliest = Infinity;
-    for (const id of profiles) {
+    for (const id of orderedProfiles) {
       let a = this.ensure(id);
       if (!a.enabled) continue;
       if (a.retry_at > this.now()) { earliest = Math.min(earliest, a.retry_at); continue; }
       const p = this.get(id);
       try {
-        if (!p.health.ready) { await this.check(id); if (!p.health.ready) throw new ProviderError(p.health.errorCode || 'UNAVAILABLE', p.health.error || 'Cuenta sin conexión.'); }
+        if (!p.health.ready) {
+          await this.check(id);
+          if (!p.health.ready) throw new ProviderError(p.health.errorCode || 'UNAVAILABLE', p.health.error || 'Cuenta sin conexión.');
+        }
         let usage;
-        try { usage = await p.usage(); p.health.usage = usage; }
-        catch (e) { if (['AUTH_REQUIRED', 'TEMPORARY', 'UNAVAILABLE', 'QUOTA'].includes(e.code)) throw e; p.health.usageWarning = redact(e.message); }
+        try {
+          usage = await p.usage();
+          p.health.usage = usage;
+        } catch (e) {
+          if (['AUTH_REQUIRED', 'TEMPORARY', 'UNAVAILABLE', 'QUOTA'].includes(e.code)) throw e;
+          p.health.usageWarning = redact(e.message);
+        }
         const retry = quotaRetry(usage, this.now());
-        if (retry) { this.exhausted(id, retry); earliest = Math.min(earliest, retry); continue; }
+        if (retry) {
+          this.exhausted(id, retry);
+          earliest = Math.min(earliest, retry);
+          continue;
+        }
         if (id !== book.profile) {
           await p.access(book.remote_id, a.email);
-          const source = (await p.sources(book.remote_id)).find(s => (s.id || s.source_id) === sourceId);
-          if (!source || ![2, 'ready', 'completed'].includes(source.status)) throw new ProviderError('ACCESS', 'La fuente del bloque no está lista en este cuaderno para la cuenta de respaldo.');
+          if (sourceId) {
+            const source = (await p.sources(book.remote_id)).find(s => (s.id || s.source_id) === sourceId);
+            if (!source || ![2, 'ready', 'completed'].includes(source.status)) {
+              throw new ProviderError('ACCESS', 'La fuente del bloque no está lista en este cuaderno para la cuenta de respaldo.');
+            }
+          }
         }
         this.store.update('accounts', id, { retry_at: 0, error: null, error_code: null });
+        this.store.db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(lastProfileKey, id);
         return { provider: p };
       } catch (e) {
         const retry = this.now() + (e.code === 'TEMPORARY' ? 60000 : 1800000);
