@@ -85,7 +85,40 @@ node scripts/create-book.mjs "Historia de la ciencia" "D:\capitulos\01.md" "D:\c
 
 El script guarda los archivos y enciende la cola; el backend continúa después de que termine el script. Puedes fijar `BOOK_REQUEST_ID` para repetir una llamada sin crear otro libro. `APP_URL` permite usar otro puerto.
 
-La API devuelve JSON. Primero consulta `GET /api/health` y utiliza su `token` como cabecera `X-Local-Token` en cada escritura. Si envías `Origin`, debe coincidir exactamente con la URL local. Los IDs de rutas son los IDs locales de la aplicación.
+## Semántica de control y operaciones
+
+Cada acción en la aplicación tiene una intención explícita y aislada:
+
+1. **Sincronizar contenido (`POST /api/books/:id/sync`)**:
+   - Reconcilia metadatos remotos (fuentes, contenidos de Studio y notas) hacia el catálogo local en SQLite (`remote_items`).
+   - **Invariante**: Sincronizar **NUNCA** genera contenidos, **NUNCA** inicia descargas automáticas, **NUNCA** comparte con otras cuentas ni elimina fuentes o audios.
+   - Si una sección remota falla (por ejemplo, Studio da timeout pero Fuentes responde bien), se actualizan las fuentes y se preserva la caché de Studio con su error visible, sin marcar elementos como ausentes.
+
+2. **Descarga manual (`POST /api/books/:id/downloads`)**:
+   - Permite descargar contenidos existentes identificados por su ID exacto, individualmente o por selección en lote.
+   - **Audio**: Descarga el original M4A y lo convierte a MP3 mediante FFmpeg, conservando el M4A.
+   - **Otros tipos de Studio**: Vídeos (MP4), Informes (Markdown), Diapositivas (PDF/PPTX), Infografías (PNG), Cuestionarios (JSON/MD), Tarjetas de estudio (JSON/MD), Mapas mentales (JSON) y Tablas de datos (CSV) se descargan con sus adaptadores específicos y se sirven con su MIME type correcto. **Cero llamadas a FFmpeg MP3 para documentos o vídeos**.
+   - **Tipos desconocidos**: Aparecen visibles en el catálogo con su tipo original y enlace remoto, con la descarga deshabilitada hasta disponer de un adaptador comprobado. Nunca se asumen como audio.
+   - **Invariante**: Descargar **NUNCA** solicita regeneración a Google.
+
+3. **Añadir material y generación selectiva**:
+   - Añadir archivos Markdown/PDF a un cuaderno sincronizado requiere permisos de escritura comprobados (`accounts.checkWriteAccess`). Nunca invita automáticamente cuentas lectoras como editoras.
+   - Las nuevas fuentes se suben al cuaderno existente sin crear cuadernos duplicados.
+   - **Generación selectiva (`POST /api/books/:id/generations`)**: Solo las fuentes explícitamente seleccionadas por el usuario entran a la cola de generación. Añadir material nunca regenera fuentes antiguas.
+
+4. **Detención y cancelación de trabajos**:
+   - **Pausar nuevas generaciones**: Detiene el envío de nuevos audios. Los audios ya despachados a Google continúan su ciclo de seguimiento y descarga.
+   - **Cancelar este bloque (`POST /api/blocks/:id/cancel`)**: Interrumpe inmediatamente las etapas locales pendientes y evita reintentos/reanudaciones automáticas tras reinicios o cuota restaurada. Si el trabajo ya fue despachado a Google, se conserva su ID y se indica claramente: *«Cancelado localmente. La generación remota puede continuar en Google»*. No se promete parada de cómputo en servidores de Google ni devolución de cuota.
+   - **Cancelar bloques pendientes (`POST /api/books/:id/cancel-pending`)**: Cancela los bloques que aún no salieron a Google e informa cuántos ya estaban en curso remoto.
+   - **Cancelación por proceso**: Los abortos terminan únicamente el proceso CLI/FFmpeg del trabajo en cuestión (`AbortController`), manteniendo el runner general y las demás cuentas operativas.
+
+5. **Eliminación remota explícita (`POST /api/books/:id/artifacts/:itemId/delete`)**:
+   - Flujo independiente de la cancelación local.
+   - Requiere confirmación explícita obligatoria (`confirm: true`).
+   - Muestra la cuenta de acceso, el cuaderno, el tipo y el ID exacto del artefacto. Advierte que es irreversible y que afecta a todas las cuentas con acceso al cuaderno compartido.
+   - Valida la pertenencia del artefacto al cuaderno y ejecuta `nlm studio delete <notebook_id> <artifact_id> --confirm -p <profile>`.
+   - Si la respuesta es incierta o falla la red, registra `uncertain` para reconciliación en la siguiente sincronización; no afirma éxito prematuro.
+   - Si el elemento reaparece tras confirmarse su borrado, se marca para revisión manual y se evita un bucle de borrados automáticos.
 
 | Método | Ruta | Entrada / resultado |
 |---|---|---|
@@ -98,13 +131,23 @@ La API devuelve JSON. Primero consulta `GET /api/health` y utiliza su `token` co
 | POST | `/api/accounts/:id/enabled` | JSON `{ "enabled": true }`; habilitar/deshabilitar perfil para la cola |
 | POST | `/api/accounts/:id/login` | Iniciar proceso de autenticación interactivo en Chrome |
 | GET | `/api/remote/notebooks` | Listado de cuadernos remotos en NotebookLM (`?profile=default`) |
-| GET | `/api/remote/notebooks/:id` | Audios, fuentes y estados locales de un cuaderno remoto |
-| POST | `/api/remote/notebooks/:id/import` | JSON `{ "title": "Libro", "profile": "default", "artifactIds": ["art-1", "art-2"] }`; descarga en lote |
+| POST | `/api/remote/notebooks/:remoteId/sync` | JSON `{ "profile": "default" }`; vincula vista local y agenda lectura de catálogo |
 | GET | `/api/books` | Libros con bloques, respaldos y estados |
 | POST | `/api/books` | JSON `{ "title": "Libro", "requestId": "clave-unica" }`; devuelve `{ "id": "..." }` con HTTP 202 |
 | GET | `/api/books/:id` | Estado completo del libro |
+| POST | `/api/books/:id/sync` | Sincronizar catálogo remoto del cuaderno (fuentes, Studio, notas) sin descargar ni generar |
+| GET | `/api/books/:id/catalog` | Catálogo persistido en SQLite, completitud por sección y capacidades |
+| POST | `/api/books/:id/generations` | JSON `{ "sourceIds": ["src-1"], "mode": "immediate" }`; genera audios de fuentes seleccionadas |
+| POST | `/api/books/:id/downloads` | JSON `{ "items": [{ "itemId": "art-1", "format": "pdf" }] }`; programa descarga manual |
+| GET | `/api/downloads` | Listado de trabajos de descarga (audio y Studio no-audio) con estados y rutas |
+| GET | `/api/downloads/:id/file` | Servir archivo descargado validado, con MIME type correcto y soporte Range |
+| POST | `/api/downloads/:id/cancel` | Cancelar trabajo de descarga individual sin afectar otros procesos |
+| POST | `/api/blocks/:id/cancel` | Cancelar bloque local individualmente |
+| POST | `/api/books/:id/cancel-pending` | Cancelar bloques pendientes de un libro; reporta cuántos eran locales vs ya remotos |
+| POST | `/api/books/:id/artifacts/:itemId/delete` | JSON `{ "confirm": true }`; eliminación remota explícita en NotebookLM |
+| GET | `/api/operations/:id` | Consultar estado de operaciones asíncronas (`sync`, `delete_artifact`) |
 | PUT | `/api/books/:id/accounts` | JSON `{ "profiles": ["cuenta2", "cuenta3"] }`; verifica permisos y asigna respaldos |
-| PUT | `/api/books/:id/files?filename=parte.md&requestId=clave-unica` | Cuerpo binario del archivo; devuelve ID del bloque. HTTP 201 |
+| PUT | `/api/books/:id/files?filename=parte.md&requestId=clave-unica` | Cuerpo binario del archivo; sube fuente a NotebookLM con permisos de editor |
 | PATCH | `/api/books/:id/order` | JSON `{ "ids": ["id-bloque-1", "id-bloque-2"] }`, todos los bloques una vez |
 | PATCH | `/api/books/:id/numbering` | JSON `{ "numbering": true }` (o `false`); renombra archivos en disco y actualiza rutas |
 | PATCH | `/api/blocks/:id` | JSON `{ "title": "Nuevo título" }`, antes de solicitar audio |

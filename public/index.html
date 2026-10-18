@@ -30,8 +30,15 @@
       <div>
         <h1 id="current-title">Del libro al podcast</h1>
         <p id="subtitle">Una fuente. Un audio. Cada bloque conserva su lugar.</p>
+        <div id="book-meta-info" class="book-meta-info" hidden>
+          <span id="book-account-badge" class="badge account"></span>
+          <span id="book-role-badge" class="badge remote-role" hidden></span>
+          <span id="book-sync-status" class="muted"></span>
+        </div>
       </div>
       <div class="header-actions">
+        <button id="sync-content-btn" class="quiet link-button" type="button" hidden>🔄 Sincronizar contenido</button>
+        <button id="cancel-pending-btn" class="quiet link-button" type="button" hidden>⛔ Cancelar bloques pendientes</button>
         <button id="open-folder-btn" class="quiet link-button" type="button" title="Abrir carpeta de este libro en el Explorador de Windows" hidden>📁 Abrir carpeta MP3</button>
         <a id="remote-link" class="quiet link-button" target="_blank" rel="noopener noreferrer" hidden>Abrir en NotebookLM</a>
       </div>
@@ -111,14 +118,92 @@
               <option value="later">⏳ Generar más tarde (ahorra cuota)</option>
             </select>
           </label>
-          <button id="pause" class="quiet">Pausar</button>
+          <button id="pause" class="quiet">Pausar nuevas generaciones</button>
           <button id="generate">Generar audios pendientes</button>
         </div>
       </div>
       <div id="quota" role="status" hidden></div>
-      <div class="table-wrap"><table><thead><tr><th>Bloque</th><th>Fuente y título</th><th>Estado</th><th>Audio</th></tr></thead><tbody id="blocks"></tbody></table><div id="empty-blocks">Añade los archivos para preparar tus primeros bloques.</div></div>
+      <div class="table-wrap"><table><thead><tr><th>Bloque</th><th>Fuente y título</th><th>Estado</th><th>Audio</th><th>Control</th></tr></thead><tbody id="blocks"></tbody></table><div id="empty-blocks">Añade los archivos para preparar tus primeros bloques.</div></div>
+
+      <div id="catalog-section" class="catalog-section" hidden>
+        <div class="catalog-header">
+          <h3>Catálogo remoto de NotebookLM</h3>
+          <p class="muted">Contenidos sincronizados desde la nube para esta cuenta de acceso.</p>
+          <div class="catalog-tabs">
+            <button id="tab-artifacts" class="tab-btn active" type="button">Contenidos Studio (<span id="count-artifacts">0</span>)</button>
+            <button id="tab-sources" class="tab-btn" type="button">Fuentes (<span id="count-sources">0</span>)</button>
+            <button id="tab-notes" class="tab-btn" type="button">Notas (<span id="count-notes">0</span>)</button>
+          </div>
+        </div>
+        <div id="catalog-pane-artifacts" class="catalog-pane">
+          <div class="catalog-actions-bar">
+            <button id="download-selected-artifacts-btn" type="button" disabled>Descargar seleccionados</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 44px;"><input type="checkbox" id="select-all-artifacts"></th>
+                  <th>Contenido</th>
+                  <th>Tipo</th>
+                  <th>Estado en Google</th>
+                  <th>Acción</th>
+                </tr>
+              </thead>
+              <tbody id="catalog-artifacts-list"></tbody>
+            </table>
+            <div id="catalog-artifacts-empty" class="remote-empty-state" hidden>No hay contenidos de Studio sincronizados.</div>
+          </div>
+        </div>
+        <div id="catalog-pane-sources" class="catalog-pane" hidden>
+          <div class="catalog-actions-bar">
+            <button id="generate-from-sources-btn" type="button" disabled>Generar audios de fuentes seleccionadas</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 44px;"><input type="checkbox" id="select-all-sources"></th>
+                  <th>Título de la fuente</th>
+                  <th>ID remoto</th>
+                  <th>Estado</th>
+                </tr>
+              </thead>
+              <tbody id="catalog-sources-list"></tbody>
+            </table>
+            <div id="catalog-sources-empty" class="remote-empty-state" hidden>No hay fuentes sincronizadas.</div>
+          </div>
+        </div>
+        <div id="catalog-pane-notes" class="catalog-pane" hidden>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Título</th>
+                  <th>ID</th>
+                  <th>Contenido</th>
+                </tr>
+              </thead>
+              <tbody id="catalog-notes-list"></tbody>
+            </table>
+            <div id="catalog-notes-empty" class="remote-empty-state" hidden>No hay notas sincronizadas.</div>
+          </div>
+        </div>
+      </div>
+
       <footer>Los archivos se guardan en la carpeta <button id="open-exports-btn" class="inline-link" type="button" title="Abrir carpeta exports en el Explorador de Windows">exports</button> del proyecto. Puedes cerrar esta pestaña; mantén la aplicación ejecutándose para continuar.</footer>
     </section>
   </main>
+  <dialog id="delete-modal" class="confirm-modal">
+    <form method="dialog" id="delete-modal-form">
+      <h3>Eliminar contenido de NotebookLM</h3>
+      <p class="modal-warning"><strong>⚠️ Esta acción es remota e irreversible.</strong> Si este cuaderno está compartido con otras cuentas, el contenido también desaparecerá para ellas.</p>
+      <div id="delete-modal-details" class="modal-details"></div>
+      <div class="modal-actions">
+        <button id="delete-modal-cancel" type="button" class="quiet">Cancelar</button>
+        <button id="delete-modal-confirm" type="submit" class="danger-btn">Eliminar definitivamente</button>
+      </div>
+    </form>
+  </dialog>
 </body>
 </html>

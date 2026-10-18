@@ -1,9 +1,10 @@
 const $ = id => document.getElementById(id);
-const labels = { pending:'Pendiente', creating:'Creando libro', ready:'Fuente lista', upload_pending:'Por cargar', uploading:'Cargando fuente', source_processing:'Procesando fuente', submitting:'Solicitando audio', queued:'En cola de Google', deferred:'En cola diferida (ahorra cuota)', generating:'Generando', download:'Descargando', convert:'Convirtiendo a MP3', done:'MP3 listo', quota:'Esperando cuota (Generar más tarde)', review:'Revisión necesaria', auth:'Iniciar sesión', error:'Error' };
+const labels = { pending:'Pendiente', creating:'Creando libro', ready:'Fuente lista', upload_pending:'Por cargar', uploading:'Cargando fuente', source_processing:'Procesando fuente', submitting:'Solicitando audio', queued:'En cola de Google', deferred:'En cola diferida (ahorra cuota)', generating:'Generando', download:'Descargando', convert:'Convirtiendo a MP3', done:'MP3 listo', quota:'Esperando cuota (Generar más tarde)', review:'Revisión necesaria', auth:'Iniciar sesión', error:'Error', canceled:'Cancelado' };
 let token, books = [], selected = localStorage.getItem('selected-book'), uploading = false, lastRender = '', refreshing = false;
 let createRequest = crypto.randomUUID();
 let accountData = { accounts: [] }, accountStamp = '', backupStamp = '', savingBackups = false;
 let viewingExplorer = false, remoteBooks = [], selectedRemoteId = null, remoteDetail = null, selectedArtifacts = new Set(), explorerProfile = null, explorerSeq = 0;
+let currentCatalog = null, selectedCatalogSources = new Set(), selectedCatalogArtifacts = new Set(), activeCatalogTab = 'artifacts', pendingDeleteTarget = null;
 const date = t => new Intl.DateTimeFormat('es-BO', { dateStyle:'medium', timeStyle:'short', timeZone:'America/La_Paz' }).format(t);
 
 function el(tag, attrs = {}, text) {
@@ -60,6 +61,9 @@ async function refresh() {
         }
         if (changed) renderRemoteDetail();
       }
+    }
+    if (!viewingExplorer && selected && (!currentCatalog || currentCatalog.bookId !== selected)) {
+      loadCatalog(selected);
     }
     render();
   } catch(e) { notice(`No se pudo conectar a la aplicación. ${e.message}`, true); }
@@ -127,7 +131,14 @@ function renderBackups(book) {
   $('backup-status').textContent = book.backups.length ? `Respaldos verificados: ${book.backups.join(', ')}` : 'Solo se está usando la cuenta propietaria.';
   $('save-backups').disabled = !book.remoteId;
 }
-function choose(id) { viewingExplorer = false; selected = id; localStorage.setItem('selected-book', id); lastRender=''; render(); }
+function choose(id) {
+  viewingExplorer = false;
+  selected = id;
+  localStorage.setItem('selected-book', id);
+  lastRender = '';
+  render();
+  loadCatalog(id);
+}
 
 async function openExplorer() {
   viewingExplorer = true; lastRender = ''; render();
@@ -136,6 +147,7 @@ async function openExplorer() {
 function closeExplorer() {
   viewingExplorer = false; if (!selected && books.length) selected = books[0].id;
   lastRender = ''; render();
+  if (selected) loadCatalog(selected);
 }
 async function loadRemoteBooks() {
   const profile = $('explorer-profile')?.value || explorerProfile || accountData.current || 'default';
@@ -171,6 +183,12 @@ function renderRemoteBooks() {
       onclick: () => selectRemoteBook(b.id)
     }, b.title);
     item.append(el('small', { class: 'account-tag' }, `Cuenta: ${curProfile}`));
+    const localBook = books.find(lb => lb.remoteId === b.id && lb.profile === curProfile);
+    if (localBook) {
+      item.append(el('small', { style: 'color: #166534; font-weight: 600;' }, localBook.lastSyncedAt ? `Sincronizado (${date(localBook.lastSyncedAt)})` : 'Sincronizado'));
+    } else {
+      item.append(el('small', {}, 'No sincronizado en biblioteca'));
+    }
     if (b.modifiedAt || b.createdAt) {
       item.append(el('small', {}, `Modificado: ${date(Date.parse(b.modifiedAt || b.createdAt))}`));
     }
@@ -191,6 +209,26 @@ async function selectRemoteBook(id) {
     const bookTitle = remoteDetail.title || remoteBooks.find(b => b.id === id)?.title || 'Cuaderno';
     $('remote-book-title').textContent = `${bookTitle} (${profile})`;
     $('remote-book-link').href = `https://notebooklm.google.com/notebook/${encodeURIComponent(id)}`;
+
+    const existingSyncBtn = $('explorer-sync-book-btn');
+    if (existingSyncBtn) existingSyncBtn.remove();
+    const syncBtn = el('button', {
+      id: 'explorer-sync-book-btn',
+      class: 'quiet link-button',
+      type: 'button',
+      onclick: () => act(async () => {
+        notice(`Sincronizando «${bookTitle}» con la biblioteca local…`);
+        const res = await api(`/api/remote/notebooks/${encodeURIComponent(id)}/sync`, {
+          method: 'POST',
+          data: { profile }
+        });
+        notice('Cuaderno sincronizado.');
+        viewingExplorer = false;
+        choose(res.bookId);
+      })
+    }, '🔄 Sincronizar con biblioteca');
+    $('remote-book-link').after(syncBtn);
+
     selectedArtifacts = new Set((remoteDetail.artifacts || []).map(a => a.id));
     $('remote-detail-empty').hidden = true;
     $('remote-detail').hidden = false;
@@ -369,6 +407,10 @@ function render() {
     $('subtitle').textContent = 'Revisa tus libros de NotebookLM y descarga sus audios en lote con un clic.';
     $('remote-link').hidden = true;
     $('open-folder-btn').hidden = true;
+    $('sync-content-btn').hidden = true;
+    $('cancel-pending-btn').hidden = true;
+    $('book-meta-info').hidden = true;
+    $('catalog-section').hidden = true;
     return;
   }
 
@@ -378,7 +420,26 @@ function render() {
   $('subtitle').textContent = book ? 'Un podcast independiente por fuente, dentro del mismo libro.' : 'Una fuente. Un audio. Cada bloque conserva su lugar.';
   $('remote-link').hidden = !book?.url; if (book?.url) $('remote-link').href=book.url;
   $('open-folder-btn').hidden = !book;
-  if (!book) return;
+  if (!book) {
+    $('book-meta-info').hidden = true;
+    $('sync-content-btn').hidden = true;
+    $('cancel-pending-btn').hidden = true;
+    $('catalog-section').hidden = true;
+    return;
+  }
+  $('book-meta-info').hidden = false;
+  $('book-account-badge').textContent = `Cuenta de acceso: ${book.profile}`;
+  if (book.remoteRole) {
+    $('book-role-badge').hidden = false;
+    $('book-role-badge').textContent = `Rol: ${book.remoteRole}`;
+  } else {
+    $('book-role-badge').hidden = true;
+  }
+  $('book-sync-status').textContent = book.lastSyncedAt
+    ? `Última sincronización: ${date(book.lastSyncedAt)}`
+    : 'No sincronizado';
+  $('sync-content-btn').hidden = !book.remoteId;
+  $('cancel-pending-btn').hidden = !book.remoteId;
   renderBackups(book);
   const status = $('book-status'); status.replaceChildren();
   if (!book.remoteId) {
@@ -470,7 +531,28 @@ function render() {
       const player=el('audio',{controls:true,preload:'none',src:block.audioUrl,'aria-label':`Audio del bloque ${block.number}`});
       audio.append(player,el('a',{class:'download-link',href:`${block.audioUrl}?download=1`,download:block.outputName},'Descargar MP3'));
     } else audio.append(el('span',{class:'audio-wait'},'Disponible al terminar'));
-    row.append(number,source,state,audio); return row;
+
+    const control = el('td');
+    if (block.state !== 'done' && block.state !== 'canceled') {
+      control.append(el('button', {
+        class: 'quiet retry',
+        onclick: () => act(async () => {
+          const r = await api(`/api/blocks/${block.id}/cancel`, { method: 'POST' });
+          notice(r.alreadyRemote
+            ? 'Cancelado localmente. La generación remota puede continuar en Google.'
+            : 'Cancelado localmente antes de enviar a Google.');
+        })
+      }, 'Cancelar este bloque'));
+    }
+    if (block.artifactId) {
+      control.append(el('button', {
+        class: 'quiet retry',
+        style: 'color: #dc2626; margin-top: 4px;',
+        onclick: () => openDeleteModal(book, block.artifactId, block.title)
+      }, 'Eliminar de NotebookLM…'));
+    }
+
+    row.append(number,source,state,audio,control); return row;
   });
   const tbody=$('blocks');
   rows.forEach((row,i)=>{if(tbody.children[i] !== row) tbody.insertBefore(row,tbody.children[i] || null);});
@@ -584,6 +666,291 @@ const drop=$('drop-zone');
 for(const event of ['dragenter','dragover']) drop.addEventListener(event,e=>{e.preventDefault();drop.classList.add('dragging');});
 for(const event of ['dragleave','drop']) drop.addEventListener(event,e=>{e.preventDefault();drop.classList.remove('dragging');});
 drop.addEventListener('drop',event=>addFiles(event.dataTransfer.files));
+function escapeHtml(str) {
+  return String(str || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+}
+
+function openDeleteModal(book, artifactId, title) {
+  pendingDeleteTarget = { book, artifactId, title };
+  $('delete-modal-details').innerHTML = `
+    <p><strong>Cuaderno:</strong> ${escapeHtml(book.title)}</p>
+    <p><strong>Cuenta de acceso:</strong> ${escapeHtml(book.profile)}</p>
+    <p><strong>Elemento:</strong> ${escapeHtml(title)}</p>
+    <p><strong>ID de artefacto:</strong> <code>${escapeHtml(artifactId)}</code></p>
+  `;
+  $('delete-modal').showModal();
+}
+
+async function loadCatalog(bookId) {
+  if (!bookId) {
+    $('catalog-section').hidden = true;
+    currentCatalog = null;
+    return;
+  }
+  const book = books.find(b => b.id === bookId);
+  if (!book?.remoteId) {
+    $('catalog-section').hidden = true;
+    currentCatalog = null;
+    return;
+  }
+  try {
+    const data = await api(`/api/books/${bookId}/catalog`);
+    currentCatalog = data;
+    renderCatalog();
+  } catch (e) {
+    currentCatalog = null;
+    $('catalog-section').hidden = true;
+  }
+}
+
+function renderCatalog() {
+  if (!currentCatalog || !selected) {
+    $('catalog-section').hidden = true;
+    return;
+  }
+  const book = books.find(b => b.id === selected);
+  if (!book || !book.remoteId) {
+    $('catalog-section').hidden = true;
+    return;
+  }
+  $('catalog-section').hidden = false;
+
+  const artifacts = currentCatalog.artifacts || [];
+  const sources = currentCatalog.sources || [];
+  const notes = currentCatalog.notes || [];
+
+  $('count-artifacts').textContent = artifacts.length;
+  $('count-sources').textContent = sources.length;
+  $('count-notes').textContent = notes.length;
+
+  const artTbody = $('catalog-artifacts-list');
+  const artEmpty = $('catalog-artifacts-empty');
+  artEmpty.hidden = artifacts.length > 0;
+  artTbody.hidden = artifacts.length === 0;
+
+  $('select-all-artifacts').checked = artifacts.length > 0 && artifacts.every(a => selectedCatalogArtifacts.has(a.id));
+  $('download-selected-artifacts-btn').disabled = selectedCatalogArtifacts.size === 0;
+  $('download-selected-artifacts-btn').textContent = selectedCatalogArtifacts.size > 0
+    ? `Descargar seleccionados (${selectedCatalogArtifacts.size})`
+    : 'Descargar seleccionados';
+
+  artTbody.replaceChildren(...artifacts.map(a => {
+    const tr = el('tr');
+    const tdCheck = el('td');
+    const cb = el('input', { type: 'checkbox', checked: selectedCatalogArtifacts.has(a.id) });
+    cb.addEventListener('change', () => {
+      if (cb.checked) selectedCatalogArtifacts.add(a.id);
+      else selectedCatalogArtifacts.delete(a.id);
+      renderCatalog();
+    });
+    tdCheck.append(cb);
+
+    const tdTitle = el('td');
+    tdTitle.append(el('strong', {}, a.title || 'Sin título'));
+    if (a.createdAt) tdTitle.append(el('small', { class: 'source-name' }, `Creado: ${date(a.createdAt)}`));
+
+    const tdType = el('td');
+    tdType.append(el('span', { class: `badge ${a.type}` }, a.type || 'desconocido'));
+
+    const tdState = el('td');
+    tdState.append(el('span', { class: `badge ${a.status === 'completed' || a.status === 'ready' ? 'done' : a.status === 'failed' ? 'error' : 'generating'}` },
+      a.status === 'completed' || a.status === 'ready' ? 'Completado' : a.status === 'failed' ? 'Error' : 'Generando'));
+    if (a.errorReason) tdState.append(el('div', { class: 'block-error' }, a.errorReason));
+
+    const tdAction = el('td');
+    const canDownload = ['completed', 'ready'].includes(a.status);
+    if (canDownload) {
+      tdAction.append(el('button', {
+        class: 'quiet link-button',
+        type: 'button',
+        onclick: () => act(async () => {
+          notice(`Solicitando descarga de «${a.title}»…`);
+          await api(`/api/books/${book.id}/downloads`, {
+            method: 'POST',
+            data: { items: [{ itemId: a.id }] }
+          });
+          notice(`Descarga programada para «${a.title}».`);
+        })
+      }, 'Descargar'));
+    }
+    tdAction.append(el('button', {
+      class: 'quiet retry',
+      style: 'color: #dc2626; margin-top: 4px;',
+      type: 'button',
+      onclick: () => openDeleteModal(book, a.id, a.title)
+    }, 'Eliminar de NotebookLM…'));
+
+    tr.append(tdCheck, tdTitle, tdType, tdState, tdAction);
+    return tr;
+  }));
+
+  const srcTbody = $('catalog-sources-list');
+  const srcEmpty = $('catalog-sources-empty');
+  srcEmpty.hidden = sources.length > 0;
+  srcTbody.hidden = sources.length === 0;
+
+  $('select-all-sources').checked = sources.length > 0 && sources.every(s => selectedCatalogSources.has(s.id));
+  $('generate-from-sources-btn').disabled = selectedCatalogSources.size === 0;
+  $('generate-from-sources-btn').textContent = selectedCatalogSources.size > 0
+    ? `Generar audios de fuentes seleccionadas (${selectedCatalogSources.size})`
+    : 'Generar audios de fuentes seleccionadas';
+
+  srcTbody.replaceChildren(...sources.map(s => {
+    const tr = el('tr');
+    const tdCheck = el('td');
+    const cb = el('input', { type: 'checkbox', checked: selectedCatalogSources.has(s.id) });
+    cb.addEventListener('change', () => {
+      if (cb.checked) selectedCatalogSources.add(s.id);
+      else selectedCatalogSources.delete(s.id);
+      renderCatalog();
+    });
+    tdCheck.append(cb);
+
+    const tdTitle = el('td');
+    tdTitle.append(el('strong', {}, s.title || 'Fuente'));
+
+    const tdId = el('td');
+    tdId.append(el('code', {}, s.id));
+
+    const tdState = el('td');
+    tdState.append(el('span', { class: `badge ${s.status === 2 || s.status === 'ready' ? 'done' : s.status === 3 ? 'error' : 'generating'}` },
+      s.status === 2 || s.status === 'ready' ? 'Lista' : s.status === 3 ? 'Error' : 'Procesando'));
+
+    tr.append(tdCheck, tdTitle, tdId, tdState);
+    return tr;
+  }));
+
+  const notesTbody = $('catalog-notes-list');
+  const notesEmpty = $('catalog-notes-empty');
+  notesEmpty.hidden = notes.length > 0;
+  notesTbody.hidden = notes.length === 0;
+
+  notesTbody.replaceChildren(...notes.map(n => {
+    const tr = el('tr');
+    const tdTitle = el('td', {}, n.title || 'Nota');
+    const tdId = el('td', {}, n.id || '—');
+    const tdContent = el('td', {}, n.content ? (n.content.slice(0, 100) + (n.content.length > 100 ? '…' : '')) : '—');
+    tr.append(tdTitle, tdId, tdContent);
+    return tr;
+  }));
+}
+
+$('sync-content-btn')?.addEventListener('click', () => {
+  if (!selected) return;
+  act(async () => {
+    notice('Sincronizando catálogo con NotebookLM…');
+    await api(`/api/books/${selected}/sync`, { method: 'POST' });
+    notice('Catálogo sincronizado.');
+    await loadCatalog(selected);
+  });
+});
+
+$('cancel-pending-btn')?.addEventListener('click', () => {
+  if (!selected) return;
+  act(async () => {
+    const res = await api(`/api/books/${selected}/cancel-pending`, { method: 'POST' });
+    notice(res.message);
+  });
+});
+
+$('tab-artifacts')?.addEventListener('click', () => {
+  activeCatalogTab = 'artifacts';
+  $('tab-artifacts').classList.add('active');
+  $('tab-sources').classList.remove('active');
+  $('tab-notes').classList.remove('active');
+  $('catalog-pane-artifacts').hidden = false;
+  $('catalog-pane-sources').hidden = true;
+  $('catalog-pane-notes').hidden = true;
+});
+$('tab-sources')?.addEventListener('click', () => {
+  activeCatalogTab = 'sources';
+  $('tab-artifacts').classList.remove('active');
+  $('tab-sources').classList.add('active');
+  $('tab-notes').classList.remove('active');
+  $('catalog-pane-artifacts').hidden = true;
+  $('catalog-pane-sources').hidden = false;
+  $('catalog-pane-notes').hidden = true;
+});
+$('tab-notes')?.addEventListener('click', () => {
+  activeCatalogTab = 'notes';
+  $('tab-artifacts').classList.remove('active');
+  $('tab-sources').classList.remove('active');
+  $('tab-notes').classList.add('active');
+  $('catalog-pane-artifacts').hidden = true;
+  $('catalog-pane-sources').hidden = true;
+  $('catalog-pane-notes').hidden = false;
+});
+
+$('select-all-artifacts')?.addEventListener('change', (e) => {
+  const artifacts = currentCatalog?.artifacts || [];
+  if (e.target.checked) selectedCatalogArtifacts = new Set(artifacts.map(a => a.id));
+  else selectedCatalogArtifacts.clear();
+  renderCatalog();
+});
+$('download-selected-artifacts-btn')?.addEventListener('click', () => {
+  if (!selected || !selectedCatalogArtifacts.size) return;
+  act(async () => {
+    notice(`Solicitando descarga de ${selectedCatalogArtifacts.size} contenidos…`);
+    const items = [...selectedCatalogArtifacts].map(id => ({ itemId: id }));
+    const res = await api(`/api/books/${selected}/downloads`, {
+      method: 'POST',
+      data: { items }
+    });
+    notice(`${res.accepted.length} descargas aceptadas.${res.rejected.length ? ` ${res.rejected.length} rechazadas.` : ''}`);
+    selectedCatalogArtifacts.clear();
+    renderCatalog();
+  });
+});
+
+$('select-all-sources')?.addEventListener('change', (e) => {
+  const sources = currentCatalog?.sources || [];
+  if (e.target.checked) selectedCatalogSources = new Set(sources.map(s => s.id));
+  else selectedCatalogSources.clear();
+  renderCatalog();
+});
+$('generate-from-sources-btn')?.addEventListener('click', () => {
+  if (!selected || !selectedCatalogSources.size) return;
+  act(async () => {
+    notice(`Generando audios para ${selectedCatalogSources.size} fuentes seleccionadas…`);
+    const sourceIds = [...selectedCatalogSources];
+    const res = await api(`/api/books/${selected}/generations`, {
+      method: 'POST',
+      data: { sourceIds, mode: $('generation-mode')?.value || 'immediate' }
+    });
+    notice(`${res.queued.length} bloques añadidos a la cola de generación.`);
+    selectedCatalogSources.clear();
+    renderCatalog();
+  });
+});
+
+$('delete-modal-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('delete-modal').close();
+  if (!pendingDeleteTarget) return;
+  const { book, artifactId, title } = pendingDeleteTarget;
+  pendingDeleteTarget = null;
+  notice(`Solicitando eliminación de «${title}» de NotebookLM…`);
+  try {
+    const res = await api(`/api/books/${book.id}/artifacts/${encodeURIComponent(artifactId)}/delete`, {
+      method: 'POST',
+      data: { confirm: true, requestId: crypto.randomUUID() }
+    });
+    if (res.status === 'confirmed') {
+      notice(`«${title}» eliminado de NotebookLM.`);
+    } else {
+      notice(`La solicitud de eliminación finalizó pero el estado remoto es incierto.`, true);
+    }
+    await refresh();
+    if (book.id === selected) await loadCatalog(selected);
+  } catch (err) {
+    notice(`Error al eliminar: ${err.message}`, true);
+  }
+});
+$('delete-modal-cancel')?.addEventListener('click', () => {
+  pendingDeleteTarget = null;
+  $('delete-modal').close();
+});
+
 refresh(); setInterval(refresh,2000);
 
 function initDesktopUpdates() {
