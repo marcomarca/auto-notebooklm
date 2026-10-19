@@ -247,6 +247,68 @@
       <footer>Los archivos se guardan en la carpeta <button id="open-exports-btn" class="inline-link" type="button" title="Abrir carpeta exports en el Explorador de Windows">exports</button> del proyecto. Puedes cerrar esta pestaña; mantén la aplicación ejecutándose para continuar.</footer>
     </section>
   </main>
+  <section id="studio-player" class="studio-player" aria-label="Reproductor de estudio" hidden>
+    <div class="player-container">
+      <div class="player-top-row">
+        <div class="player-heading">
+          <span id="player-badge" class="player-badge">En pausa</span>
+          <div class="player-title-wrap">
+            <strong id="player-title" class="player-title">Sin audio seleccionado</strong>
+            <span id="player-book" class="player-book"></span>
+          </div>
+        </div>
+        <div class="player-top-actions">
+          <span id="player-message" class="player-message" role="status" hidden></span>
+          <button id="player-retry-btn" class="cell-btn quiet" type="button" hidden>Reintentar</button>
+          <button id="player-revision-btn" class="cell-btn quiet" type="button" hidden>Cargar nueva versión</button>
+          <a id="player-download-btn" class="download-link player-download-link" href="#" download hidden>Descargar MP3</a>
+        </div>
+      </div>
+      <div class="player-timeline-row">
+        <span id="player-current-time" class="player-time" aria-label="Tiempo transcurrido">--:--</span>
+        <div class="player-slider-wrap">
+          <input id="player-progress" class="player-progress" type="range" min="0" max="0" value="0" step="0.1"
+                 aria-label="Línea de tiempo" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="00:00 de 00:00" disabled>
+        </div>
+        <span id="player-duration" class="player-time" aria-label="Duración total">--:--</span>
+      </div>
+      <div class="player-controls-row">
+        <div class="player-nav-group">
+          <button id="player-step-back" class="player-step-btn" type="button" aria-label="Retroceder 15 segundos" title="Retroceder 15 segundos (Flecha izquierda)" disabled>−15 s</button>
+          <button id="player-play-btn" class="player-play-btn" type="button" aria-label="Reproducir" title="Reproducir / Pausar (Espacio)" disabled>
+            <span id="player-play-icon" aria-hidden="true">▶</span>
+            <span id="player-play-label">Reproducir</span>
+          </button>
+          <button id="player-step-forward" class="player-step-btn" type="button" aria-label="Adelantar 15 segundos" title="Adelantar 15 segundos (Flecha derecha)" disabled>+15 s</button>
+        </div>
+        <div class="player-options-group">
+          <div class="player-rate-control">
+            <label for="player-rate-select" class="player-control-label">Velocidad</label>
+            <select id="player-rate-select" class="player-select" aria-label="Velocidad de reproducción">
+              <option value="0.75">0,75×</option>
+              <option value="1" selected>1×</option>
+              <option value="1.25">1,25×</option>
+              <option value="1.5">1,5×</option>
+              <option value="1.75">1,75×</option>
+              <option value="2">2×</option>
+              <option value="2.5">2,5×</option>
+            </select>
+          </div>
+          <div class="player-volume-control">
+            <button id="player-mute-btn" class="player-mute-btn" type="button" aria-label="Silenciar" title="Silenciar / Restaurar sonido">
+              <span id="player-volume-icon" aria-hidden="true">🔊</span>
+            </button>
+            <input id="player-volume-slider" class="player-volume-slider" type="range" min="0" max="1" step="0.05" value="1"
+                   aria-label="Volumen" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
+          </div>
+        </div>
+        <div class="player-hint-text">
+          <small>Atajos: Espacio (pausar/reanudar) · ← / → (15 s)</small>
+        </div>
+      </div>
+    </div>
+    <audio id="studio-audio" preload="none"></audio>
+  </section>
   <aside id="quota-preview" class="quota-preview" aria-labelledby="quota-preview-title" hidden>
     <strong id="quota-preview-title">Cuota disponible</strong>
     <div id="quota-preview-accounts"></div>

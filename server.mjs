@@ -947,7 +947,10 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
           return send(res, 200, result);
         }
         if (parts[3] === 'audio' && ['GET', 'HEAD'].includes(req.method) && block.state === 'done') {
-          const { size } = await import('node:fs/promises').then(fs => fs.stat(block.output_path));
+          if (!block.output_path) return send(res, 404, { error: 'Archivo no encontrado.' });
+          const fsStat = await import('node:fs/promises').then(fs => fs.stat(block.output_path)).catch(() => null);
+          if (!fsStat || fsStat.size === 0) return send(res, 404, { error: 'El archivo en disco no existe o está vacío.' });
+          const { size } = fsStat;
           let start = 0, end = size - 1, status = 200;
           if (req.headers.range) {
             const match = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
@@ -960,7 +963,7 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
           const name = block.output_path.split(/[\\/]/).at(-1);
           const encodedName = encodeURIComponent(name).replace(/['()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
           res.writeHead(status, { 'Content-Type': 'audio/mpeg', 'Content-Length': end - start + 1, 'Accept-Ranges': 'bytes',
-            'Content-Disposition': `${url.searchParams.has('download') ? 'attachment' : 'inline'}; filename="audio.mp3"; filename*=UTF-8''${encodedName}`,
+            'Content-Disposition': `${url.searchParams.has('download') ? 'attachment' : 'inline'}; filename="${name}"; filename*=UTF-8''${encodedName}`,
             ...(status === 206 ? { 'Content-Range': `bytes ${start}-${end}/${size}` } : {}) });
           if (req.method === 'HEAD') return res.end();
           await pipeline(createReadStream(block.output_path, { start, end }), res); return;

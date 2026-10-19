@@ -100,7 +100,7 @@ test('interfaz real: matriz, reproducción, vista previa PNG, cuota compacta y p
     const restore = [...document.querySelectorAll('#matrix-body button')].find(button => button.textContent === 'Recuperar audio anterior');
     check(!!restore, 'No ofrece recuperar el audio que sigue disponible');
     restore.click();
-    await waitFor(() => !!document.querySelector('#matrix-body audio'));
+    await waitFor(() => !!document.querySelector('#matrix-body .audio-listen-btn'));
     const buttons = [...document.querySelectorAll('#matrix-body button')].map(button => button.textContent);
     check(!buttons.some(text => /Aprobar|Rechazar|Nueva revisión/.test(text)), 'La matriz conserva acciones editoriales confusas');
     check(!document.querySelector('#matrix-body').textContent.includes('Sin revisar'), 'La matriz todavía exige revisión editorial');
@@ -117,7 +117,11 @@ test('interfaz real: matriz, reproducción, vista previa PNG, cuota compacta y p
     document.querySelector('#infographic-close').click();
     check(!viewer.open, 'No se puede cerrar la vista ampliada');
     await waitFor(() => !fullImage.hasAttribute('src'));
-    const player = document.querySelector('#matrix-body audio');
+    const listenBtn = document.querySelector('#matrix-body .audio-listen-btn');
+    check(!!listenBtn, 'Falta botón de escuchar en la fila de audio');
+    listenBtn.click();
+    const player = document.querySelector('#studio-audio');
+    check(!!player, 'Falta el reproductor persistente de estudio');
     player.muted = true;
     await player.play();
     await waitFor(() => player.currentTime > 0.05);
@@ -125,7 +129,7 @@ test('interfaz real: matriz, reproducción, vista previa PNG, cuota compacta y p
     await loadMatrix(selected);
     currentMatrix.matrix[1].materials.infographic.error = 'Nueva incidencia en otra fila';
     renderMatrix();
-    check(document.querySelector('#matrix-body audio') === player, 'El refresco reemplazó el reproductor');
+    check(document.querySelector('#studio-audio') === player, 'El refresco reemplazó el reproductor');
     check(document.querySelector('#matrix-body .infographic-preview img') === thumbnail, 'El refresco reemplazó la miniatura');
     check(!player.paused && player.currentTime >= position, 'El refresco interrumpió la reproducción');
     player.pause();

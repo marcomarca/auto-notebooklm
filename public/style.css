@@ -216,6 +216,328 @@ button.quiet, .link-button.quiet { background: #eee8f7; color: #593990; }
 .quota-preview-row.unknown .quota-preview-track { background: repeating-linear-gradient(135deg, #e2e8f0, #e2e8f0 3px, #f8fafc 3px, #f8fafc 6px); }
 .quota-preview-row:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 3px; }
 main { padding-bottom: 200px; }
+body.has-studio-player main { padding-bottom: 240px; }
+body.has-studio-player .sidebar { padding-bottom: 160px; }
+body.has-studio-player .quota-preview { bottom: 140px; }
+
+/* Studio Player Console */
+.studio-player {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 40;
+  background: #ffffff;
+  border-top: 1px solid var(--line);
+  box-shadow: 0 -4px 24px rgba(15, 23, 42, 0.1);
+  color: #203248;
+  padding: 12px clamp(16px, 3vw, 32px);
+  font-family: inherit;
+}
+.player-container {
+  max-width: 1500px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.player-top-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.player-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+.player-title-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.player-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #203248;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.player-book {
+  font-size: 13px;
+  color: var(--muted);
+}
+.player-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: #f0ebfa;
+  color: #593990;
+  border: 1px solid #d5c8ed;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.player-badge.playing {
+  background: #e0f2e8;
+  color: #166534;
+  border-color: #bbf7d0;
+}
+.player-badge.paused {
+  background: #f0ebfa;
+  color: #593990;
+  border-color: #d5c8ed;
+}
+.player-badge.waiting, .player-badge.loading {
+  background: #fef3c7;
+  color: #92400e;
+  border-color: #fde68a;
+}
+.player-badge.ended {
+  background: #f1f5f9;
+  color: #475569;
+  border-color: #cbd5e1;
+}
+.player-badge.error {
+  background: #fee2e2;
+  color: #b91c1c;
+  border-color: #fca5a5;
+}
+.player-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.player-message {
+  font-size: 12px;
+  font-weight: 600;
+  color: #b91c1c;
+}
+.player-timeline-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+}
+.player-time {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 44px;
+  text-align: center;
+}
+.player-slider-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+.player-progress {
+  width: 100%;
+  height: 8px;
+  border-radius: 4px;
+  background: #e1ddea;
+  outline: none;
+  cursor: pointer;
+  accent-color: #6344a8;
+  margin: 0;
+  padding: 0;
+}
+.player-progress:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.player-controls-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.player-nav-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.player-step-btn {
+  background: #f0ebfa;
+  color: #593990;
+  border: 1px solid #d5c8ed;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  transition: all .15s ease;
+}
+.player-step-btn:hover:not(:disabled) {
+  background: #e4dbf5;
+}
+.player-step-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.player-play-btn {
+  background: #6344a8;
+  color: #ffffff;
+  border: 0;
+  border-radius: 8px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  box-shadow: 0 2px 8px rgba(99, 68, 168, 0.25);
+  transition: all .15s ease;
+}
+.player-play-btn:hover:not(:disabled) {
+  filter: brightness(0.92);
+  transform: translateY(-1px);
+}
+.player-play-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+.player-play-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+.player-options-group {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.player-rate-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.player-control-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.player-select {
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: #203248;
+  cursor: pointer;
+}
+.player-volume-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.player-mute-btn {
+  background: #f0ebfa;
+  border: 1px solid #d5c8ed;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 14px;
+  cursor: pointer;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.player-volume-slider {
+  width: 90px;
+  height: 6px;
+  border-radius: 3px;
+  accent-color: #6344a8;
+  cursor: pointer;
+  margin: 0;
+  padding: 0;
+}
+.player-hint-text {
+  font-size: 11px;
+  color: var(--muted);
+}
+.audio-listen-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  background: #f0ebfa;
+  color: #593990;
+  border: 1px solid #d5c8ed;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.audio-listen-btn:hover {
+  background: #e4dbf5;
+  border-color: #c4b0e5;
+}
+.audio-listen-btn.is-active-track {
+  background: #6344a8;
+  color: #ffffff;
+  border-color: #52358f;
+  box-shadow: 0 1px 4px rgba(99, 68, 168, 0.3);
+}
+.audio-track-tag {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  margin-top: 4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.audio-track-tag.playing {
+  background: #dcfce7;
+  color: #15803d;
+}
+.audio-track-tag.paused {
+  background: #f1f5f9;
+  color: #475569;
+}
+@media (max-width: 900px) {
+  .player-controls-row {
+    justify-content: flex-start;
+    gap: 12px;
+  }
+  .player-hint-text {
+    display: none;
+  }
+}
+@media (max-width: 600px) {
+  .studio-player {
+    padding: 10px 14px;
+  }
+  .player-options-group {
+    gap: 10px;
+    width: 100%;
+    justify-content: space-between;
+  }
+  .player-volume-slider {
+    width: 65px;
+  }
+}
+
 
 
 
