@@ -229,7 +229,7 @@ test('Fase 7: Aceptación integral simulada (40 bloques × 2 materiales = 80 req
 
   // Configure 4 distinct accounts with emails
   const profiles = ['profile-a', 'profile-b', 'profile-c', 'profile-d'];
-  const emails = ['user-a@org.com', 'user-b@org.com', 'user-c@org.com', 'user-d@org.com'];
+  const emails = ['user-a@example.org', 'user-b@example.org', 'user-c@example.org', 'user-d@example.org'];
   for (let i = 0; i < 4; i++) {
     app.accounts.ensure(profiles[i], emails[i]);
     app.store.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(`account_email:${profiles[i]}`, emails[i]);

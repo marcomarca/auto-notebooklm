@@ -8,3 +8,45 @@ build/runtime-bootstrap/
 runtime/
 
 /BloqueAudioDev.exe
+
+# Private runtime state and account credentials
+.env
+.env.*
+!.env.example
+!.env.sample
+.notebooklm*/
+profiles/
+sessions/
+browser-data/
+user-data/
+backups/
+screenshots/
+artifacts/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+*.lnk
+credentials*.json
+client_secret*.json
+storage_state*.json
+cookies*.json
+token*.json
+oauth*.json
+.npmrc
+.pypirc
+.netrc
+
+# Local planning and diagnostics may contain personal paths and account details
+/PLAN*.md
+/GUIA*.md
+/DIAGNOSTICO*.md
+/plan.md
+/run.md

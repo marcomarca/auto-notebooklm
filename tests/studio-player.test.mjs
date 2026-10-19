@@ -409,12 +409,11 @@ test('Reproductor de estudio: integración completa en Electron real con audio d
   assert.ok(output.includes('STUDIO_RESULT:{"ok":true}'), output);
   assert.ok(output.includes('SCREENSHOTS_SAVED:true'), output);
 
-  // Copy screenshots to artifact directory for evidence and presentation
-  const artifactDir = 'C:\\Users\\Rescate\\.gemini\\antigravity-ide\\brain\\3eeefc21-31c9-4e3a-bea3-77a7b2c2ee7f';
-  for (const name of ['studio-player-1280x860.png', 'studio-player-900x600.png', 'studio-player-390x844.png']) {
-    const src = join(screenshotsDir, name);
-    const dest = join(artifactDir, name);
-    const data = await readFile(src);
-    await writeFile(dest, data);
+  const artifactDir = process.env.BLOQUEAUDIO_TEST_ARTIFACTS_DIR;
+  if (artifactDir) {
+    await mkdir(artifactDir, { recursive: true });
+    for (const name of ['studio-player-1280x860.png', 'studio-player-900x600.png', 'studio-player-390x844.png']) {
+      await writeFile(join(artifactDir, name), await readFile(join(screenshotsDir, name)));
+    }
   }
 });

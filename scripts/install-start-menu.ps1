@@ -11,7 +11,7 @@ foreach($entry in @(@('BloqueAudio', (Join-Path $projectDir 'BloqueAudioDev.exe'
     $shortcut=$links.CreateShortcut((Join-Path $programs ($entry[0]+'.lnk')))
     $shortcut.TargetPath=$entry[1];$shortcut.WorkingDirectory=$projectDir
     $shortcut.IconLocation=(Join-Path $projectDir 'public\icon.ico')+',0'
-    $shortcut.Description=if($entry[0] -eq 'BloqueAudio'){'BloqueAudio - desarrollo desde D:\apps-2026\auto-notebooklm'}else{'BloqueAudio - distribucion 1.1.1'}
+    $shortcut.Description=if($entry[0] -eq 'BloqueAudio'){"BloqueAudio - desarrollo desde $projectDir"}else{'BloqueAudio - distribucion 1.1.1'}
     $shortcut.Save()
     [ShellRefresh]::SHChangeNotify(2,5,(Join-Path $programs ($entry[0]+'.lnk')),$null)
 }

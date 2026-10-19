@@ -87,9 +87,10 @@ test('interfaz real: matriz, reproducción, vista previa PNG, cuota compacta y p
       check(rows[3].classList.contains('unknown') && rows[3].textContent.includes('Sin datos'), 'Inventa cuota desconocida');
       check(rows[3].querySelector('[role=progressbar]').getAttribute('aria-valuenow') === null, 'Cuota desconocida se anuncia como cero');
       check(rows[0].querySelector('[role=progressbar]').getAttribute('aria-valuenow') === '80', 'Falta valor accesible de cuota');
-      check(getComputedStyle(panel).position === 'fixed', 'El panel no permanece visible');
+      check(panel.closest('.sidebar') && getComputedStyle(panel).position !== 'fixed', 'La cuota debe estar en la biblioteca sin cubrir materiales');
+      panel.scrollIntoView({ block: 'nearest' });
       const bounds = panel.getBoundingClientRect();
-      check(bounds.right <= innerWidth && bounds.bottom <= innerHeight, 'El panel queda fuera de pantalla');
+      check(bounds.right <= innerWidth && bounds.bottom <= innerHeight + 1, 'El panel queda fuera de pantalla: ' + JSON.stringify({ right: bounds.right, bottom: bounds.bottom, width: innerWidth, height: innerHeight }));
       accountData.accounts[0].errorCode = 'QUOTA';
       renderAccounts();
       check(panel.querySelector('.quota-preview-row').textContent.includes('En espera'), 'Muestra un saldo antiguo pese al rechazo por cuota');

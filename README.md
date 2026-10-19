@@ -1,4 +1,4 @@
-# Audios de NotebookLM por bloques
+# auto-notebooklm · BloqueAudio
 
 Web local para crear un libro de NotebookLM, cargar Markdown/PDF y generar un podcast independiente por fuente. Cada audio usa exactamente un ID de fuente del mismo cuaderno y se descarga por su propio ID. Español latinoamericano (`es-419`), formato podcast `deep_dive`, duración estándar `default` y exportación MP3 real.
 
@@ -174,14 +174,22 @@ npm run test:live
 
 `node scripts/preview-check.mjs` sirve una biblioteca desechable de 25 bloques para verificar la interfaz. No llama a NotebookLM, no sirve audios reales y se cierra automáticamente después de tres minutos.
 
-## BloqueAudio 1.1.1 (carpeta activa D:)
+## BloqueAudio 1.1.1: desarrollo y escritorio
 
-Este proyecto activo está en `D:\apps-2026\auto-notebooklm`. La copia bajo `Documents/ChatGPT` es otra biblioteca y otro repositorio; sus compilaciones no actualizan esta aplicación.
+Ejecuta los comandos desde la carpeta donde hayas clonado este repositorio. Cada copia de desarrollo mantiene su propia biblioteca local.
 
 - `npm run dev` o `start-app.bat`: inicia el código actual en el navegador, reinicia el backend al guardar módulos y conserva `data/` y `exports/` de esta carpeta.
 - `npm run dist:win`: recompila el instalador Electron `dist/BloqueAudio-Setup-1.1.1.exe` y la aplicación `dist/win-unpacked/BloqueAudio.exe`.
 - `npm run install:start-menu`: registra BloqueAudio (desarrollo) y BloqueAudio (distribucion) con identificadores propios de Windows. No inicia automáticamente al encender el PC.
-- El escritorio conserva `%APPDATA%/AutoNotebookLM` y `Documents/AutoNotebookLM/exports`; el cambio de marca no mueve ni reemplaza esa biblioteca. El navegador de desarrollo conserva la biblioteca de D:.
+- El escritorio conserva `%APPDATA%/AutoNotebookLM` y `Documents/AutoNotebookLM/exports`; el cambio de marca no mueve ni reemplaza esa biblioteca. El navegador de desarrollo conserva la biblioteca de su carpeta del proyecto.
 - `node scripts/smoke-desktop.mjs`: prueba el ejecutable real con datos temporales, sin acceder a Google ni iniciar trabajos, y cierra todos sus procesos.
 
 Correcciones: lectura de `runtime.json` con BOM generado por PowerShell; uso directo del runtime incluido para evitar copiar miles de archivos antes de abrir la interfaz; desactivación del actualizador mientras su repositorio siga siendo el ejemplo OWNER; errores de inicio visibles. La versión aparece en la interfaz y en las propiedades del ejecutable.
+
+## Privacidad y publicación
+
+El repositorio contiene código, recursos de interfaz y pruebas con datos simulados. Cada persona debe iniciar su propia sesión de NotebookLM; no se distribuyen cuentas ni sesiones preconfiguradas.
+
+No subas `data/`, `exports/`, respaldos, perfiles de navegador, cookies, archivos de entorno, claves privadas, bases de datos ni capturas con información personal. Estas categorías están excluidas mediante `.gitignore`. Un archivo previamente rastreado no queda protegido solo por añadirlo a `.gitignore`: revisa siempre los cambios preparados antes de publicar.
+
+Las pruebas normales usan un proveedor simulado y cierran sus servidores y procesos. Las capturas de pruebas se guardan temporalmente; puedes conservarlas indicando una carpeta con `BLOQUEAUDIO_TEST_ARTIFACTS_DIR`.

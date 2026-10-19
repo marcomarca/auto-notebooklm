@@ -158,7 +158,7 @@ test('login abre sesión con windowsHide: false, gestiona estado activo y no es 
       this.health = { ready: true, auth: true, profile: this.profile, error: null };
     }
     async check() { return this.health; }
-    async profiles() { return [{ id: this.profile, email: `${this.profile}@gmail.com` }]; }
+    async profiles() { return [{ id: this.profile, email: `${this.profile}@example.com` }]; }
   }
   const providers = new Map(['default', 'cuenta2'].map(id => [id, new LoginProvider(id)]));
   const accounts = new Accounts(store, providers.get('default'), { factory: id => providers.get(id) });
@@ -176,7 +176,7 @@ test('login abre sesión con windowsHide: false, gestiona estado activo y no es 
   await Promise.all(accounts.tasks);
   assert.equal(accounts.loginProfile, null);
   assert.deepEqual(calls, [['login', 'cuenta2']]);
-  assert.equal(accounts.ensure('cuenta2').email, 'cuenta2@gmail.com');
+  assert.equal(accounts.ensure('cuenta2').email, 'cuenta2@example.com');
   assert.equal(providers.get('cuenta2').health.ready, true);
 });
 test('Provider.login ejecuta comando sin ocultar ventana y extrae errores JSON limpiamente', async () => {

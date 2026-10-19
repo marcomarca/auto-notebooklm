@@ -15,18 +15,25 @@ const materialLabels = {
   failed: 'Fallido',
   canceled: 'Cancelado'
 };
-let token, books = [], selected = localStorage.getItem('selected-book'), uploading = false, lastRender = '', refreshing = false;
+let token, books = [], selected = null, uploading = false, lastRender = '', refreshing = false;
+try { selected = localStorage.getItem('selected-book'); } catch (_) {}
 let createRequest = crypto.randomUUID();
 let accountData = { accounts: [] }, accountStamp = '', backupStamp = '', savingBackups = false;
 let viewingExplorer = false, remoteBooks = [], selectedRemoteId = null, remoteDetail = null, selectedArtifacts = new Set(), explorerProfile = null, explorerSeq = 0;
 let currentCatalog = null, selectedCatalogSources = new Set(), selectedCatalogArtifacts = new Set(), activeCatalogTab = 'artifacts', pendingDeleteTarget = null;
 let catalogRequestSeq = 0, catalogLoadError = null, lastCatalogLoadTime = 0;
+let lastCatalogRenderStamp = '';
 let recipes = [], recipesLoaded = false, activeViewTab = 'matrix', currentMatrix = null, currentPlanPreview = null;
 let matrixRequestSeq = 0, matrixPage = 1, planRequestId = null;
 let librarySearchQuery = '', libraryPage = 1, libraryTotal = 0, searchDebounce = null;
 let lastFocusedElement = null, lastDialogTrigger = null;
-let refreshTimeout = null, consecutiveRefreshErrors = 0;
+let refreshTimeout = null, consecutiveRefreshErrors = 0, refreshPending = false, refreshStopped = false, refreshPromise = null;
+let recipesPromise = null;
+const catalogLoads = new Map(), matrixLoads = new Map();
+const timedReadControllers = new Set();
+let planConfirming = false, planPreviewLoading = false;
 let currentNoticeToast = null, noticeDismissTimer = null;
+const persistentNotices = new Map();
 const date = t => new Intl.DateTimeFormat('es-BO', { dateStyle:'medium', timeStyle:'short', timeZone:'America/La_Paz' }).format(t);
 const safeDate = t => {
   if (!t) return '—';
@@ -47,7 +54,7 @@ function el(tag, attrs = {}, text) {
   return node;
 }
 
-function notice(text, error = false, { persistent = false } = {}) {
+function notice(text, error = false, { persistent = false, source = 'operation' } = {}) {
   const legacyNotice = $('notice');
   if (legacyNotice) {
     legacyNotice.textContent = text || '';
@@ -58,6 +65,11 @@ function notice(text, error = false, { persistent = false } = {}) {
   if (!container) return;
 
   if (!text) {
+    if (source !== 'operation') {
+      persistentNotices.get(source)?.remove();
+      persistentNotices.delete(source);
+      return;
+    }
     if (currentNoticeToast && !currentNoticeToast.dataset.error && !currentNoticeToast.dataset.persistent) {
       if (noticeDismissTimer) { clearTimeout(noticeDismissTimer); noticeDismissTimer = null; }
       currentNoticeToast.remove();
@@ -66,17 +78,17 @@ function notice(text, error = false, { persistent = false } = {}) {
     return;
   }
 
-  if (currentNoticeToast && currentNoticeToast.dataset.message === text) {
+  const previous = (error || persistent) ? persistentNotices.get(source) : currentNoticeToast;
+  if (previous && previous.dataset.message === text) {
     return;
   }
 
-  if (noticeDismissTimer) {
+  if (!error && !persistent && noticeDismissTimer) {
     clearTimeout(noticeDismissTimer);
     noticeDismissTimer = null;
   }
-  if (currentNoticeToast) {
-    currentNoticeToast.remove();
-    currentNoticeToast = null;
+  if (previous) {
+    previous.remove();
   }
 
   const toast = el('div', { class: `notice-toast ${error ? 'error' : 'success'}` });
@@ -94,18 +106,22 @@ function notice(text, error = false, { persistent = false } = {}) {
     title: 'Cerrar aviso'
   }, '×');
   closeBtn.addEventListener('click', () => {
-    if (noticeDismissTimer) { clearTimeout(noticeDismissTimer); noticeDismissTimer = null; }
+    if (currentNoticeToast === toast && noticeDismissTimer) { clearTimeout(noticeDismissTimer); noticeDismissTimer = null; }
     toast.remove();
     if (currentNoticeToast === toast) currentNoticeToast = null;
+    if (persistentNotices.get(source) === toast) persistentNotices.delete(source);
   });
   toast.append(closeBtn);
 
   container.append(toast);
-  currentNoticeToast = toast;
+  if (error || persistent) persistentNotices.set(source, toast);
+  else currentNoticeToast = toast;
 
   if (!error && !persistent) {
     const startTimer = () => {
+      if (currentNoticeToast !== toast || toast.matches(':hover') || toast.contains(document.activeElement)) return;
       noticeDismissTimer = setTimeout(() => {
+        noticeDismissTimer = null;
         if (currentNoticeToast === toast) {
           toast.remove();
           currentNoticeToast = null;
@@ -132,9 +148,11 @@ function notice(text, error = false, { persistent = false } = {}) {
 async function api(path, { method = 'GET', data, binary, timeout, signal } = {}) {
   let timer = null;
   let abortSignal = signal;
-  if (!signal && timeout && timeout > 0) {
-    const controller = new AbortController();
-    abortSignal = controller.signal;
+  let controller;
+  if (timeout && timeout > 0) {
+    controller = new AbortController();
+    abortSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+    timedReadControllers.add(controller);
     timer = setTimeout(() => controller.abort(new Error(`Timeout de red (${timeout}ms)`)), timeout);
   }
   try {
@@ -152,6 +170,7 @@ async function api(path, { method = 'GET', data, binary, timeout, signal } = {})
     return value;
   } finally {
     if (timer) clearTimeout(timer);
+    if (controller) timedReadControllers.delete(controller);
   }
 }
 
@@ -328,7 +347,7 @@ const studioPlayer = {
     const bar = $('player-buffer-bar');
     if (!bar) return;
     const audio = this.audio;
-    if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0 || !audio.buffered || audio.buffered.length === 0) {
+    if (!audio || audio.error || !Number.isFinite(audio.duration) || audio.duration <= 0 || !audio.buffered || audio.buffered.length === 0) {
       bar.style.background = 'transparent';
       return;
     }
@@ -380,6 +399,9 @@ const studioPlayer = {
 
     audio.addEventListener('progress', () => {
       this.updateBufferBar();
+    });
+    audio.addEventListener('emptied', () => {
+      $('player-buffer-bar')?.style.setProperty('background', 'transparent');
     });
 
     audio.addEventListener('seeking', () => {
@@ -620,6 +642,7 @@ const studioPlayer = {
 
   wireKeyboardShortcuts() {
     window.addEventListener('keydown', e => {
+      if (e.defaultPrevented || e.ctrlKey || e.altKey || e.metaKey) return;
       if (!this.hasTrack()) return;
       if (document.querySelector('dialog[open]')) return;
 
@@ -631,6 +654,7 @@ const studioPlayer = {
                       activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT' || active?.isContentEditable;
       const isButton = tag === 'BUTTON' || (typeof target?.getAttribute === 'function' && target.getAttribute('role') === 'button') ||
                        activeTag === 'BUTTON' || (typeof active?.getAttribute === 'function' && active.getAttribute('role') === 'button');
+      if (isInput || isButton || tag === 'A' || activeTag === 'A') return;
 
       if (e.code === 'Space' || e.key === ' ') {
         if (isInput) return;
@@ -782,7 +806,7 @@ const studioPlayer = {
       progress.max = 0;
       progress.disabled = true;
     }
-    this.updateBufferBar();
+    $('player-buffer-bar')?.style.setProperty('background', 'transparent');
     const backBtn = $('player-step-back');
     if (backBtn) backBtn.disabled = true;
     const fwdBtn = $('player-step-forward');
@@ -871,9 +895,9 @@ function showHealth(h) {
   $('login-hint').textContent = `nlm login -p ${h.profile || 'default'}`;
 }
 function hasPendingActivity() {
-  if (uploading) return true;
+  if (uploading || accountData.loginProfile) return true;
   if (books.some(b => ['creating', 'upload_pending', 'uploading', 'source_processing', 'submitting', 'queued', 'generating', 'download', 'convert'].includes(b.state) ||
-                      b.running ||
+                      (b.running && (b.materialSummary?.pending > 0 || (b.blocks || []).some(bl => !['done', 'canceled', 'error', 'review', 'auth', 'quota'].includes(bl.state)))) ||
                       (b.blocks || []).some(bl => ['download', 'convert', 'generating', 'submitting', 'uploading', 'source_processing', 'queued'].includes(bl.state)))) {
     return true;
   }
@@ -885,7 +909,7 @@ function hasPendingActivity() {
 
 function getNextRefreshDelay() {
   if (consecutiveRefreshErrors > 0) {
-    return Math.min(60000, 2000 * Math.pow(1.5, consecutiveRefreshErrors));
+    return Math.min(30000, 2000 * Math.pow(2, consecutiveRefreshErrors - 1));
   }
   if (typeof document !== 'undefined' && document.hidden) {
     return 30000;
@@ -901,6 +925,7 @@ function scheduleNextRefresh(overrideDelay) {
     clearTimeout(refreshTimeout);
     refreshTimeout = null;
   }
+  if (refreshStopped) return;
   const delay = typeof overrideDelay === 'number' ? overrideDelay : getNextRefreshDelay();
   refreshTimeout = setTimeout(() => {
     refreshTimeout = null;
@@ -909,6 +934,8 @@ function scheduleNextRefresh(overrideDelay) {
 }
 
 function scheduleImmediateRefresh() {
+  if (refreshStopped) return;
+  if (refreshing) { refreshPending = true; return; }
   if (refreshTimeout) {
     clearTimeout(refreshTimeout);
     refreshTimeout = null;
@@ -919,15 +946,23 @@ function scheduleImmediateRefresh() {
   }, 30);
 }
 
-async function refresh() {
-  if (refreshing) return;
+function refresh() {
+  if (refreshStopped) return Promise.resolve();
+  if (refreshing) { refreshPending = true; return refreshPromise; }
+  if (refreshTimeout) { clearTimeout(refreshTimeout); refreshTimeout = null; }
   refreshing = true;
+  refreshPromise = (async () => {
   try {
-    const [health, current, profiles] = await Promise.all([api('/api/health'), api('/api/books'), api('/api/accounts')]);
+    const results = await Promise.allSettled(['/api/health', '/api/books', '/api/accounts'].map(path => api(path, { timeout: 15000 })));
+    const failed = results.find(r => r.status === 'rejected');
+    if (failed) throw failed.reason;
+    const [health, current, profiles] = results.map(r => r.value);
+    if (refreshStopped) return;
     consecutiveRefreshErrors = 0;
+    notice('', false, { source: 'connection' });
     accountData = profiles; renderAccounts();
     showHealth(health); books = current;
-    if (!viewingExplorer && !books.some(b=>b.id === selected)) selected = books[0]?.id;
+    if (!viewingExplorer && !books.some(b=>b.id === selected)) choose(books[0]?.id);
     if (viewingExplorer && selectedRemoteId && remoteDetail) {
       const targetProfile = remoteDetail.profile || explorerProfile;
       const localBook = books.find(b => (b.remoteId === selectedRemoteId && b.profile === targetProfile) || (remoteDetail.localBookId && b.id === remoteDetail.localBookId));
@@ -948,28 +983,32 @@ async function refresh() {
         if (changed) renderRemoteDetail();
       }
     }
-    if (!recipesLoaded) {
-      recipesLoaded = true;
-      loadRecipes();
-    }
+    const reads = [];
+    if (!recipesLoaded) reads.push(loadRecipes());
     if (!viewingExplorer && selected) {
       if (!currentCatalog || currentCatalog.bookId !== selected) {
-        loadCatalog(selected);
+        reads.push(loadCatalog(selected));
       } else if (hasPendingActivity() || Date.now() - lastCatalogLoadTime > 30000) {
-        loadCatalog(selected);
+        reads.push(loadCatalog(selected));
       }
       if (activeViewTab === 'matrix') {
-        loadMatrix(selected);
+        reads.push(loadMatrix(selected));
       }
     }
     render();
+    await Promise.allSettled(reads);
   } catch(e) {
+    if (refreshStopped) return;
     consecutiveRefreshErrors++;
-    notice(`No se pudo conectar a la aplicación. ${e.message}`, true);
+    notice(`No se pudo conectar a la aplicación. ${e.message}`, true, { source: 'connection' });
   } finally {
     refreshing = false;
-    scheduleNextRefresh();
+    const pending = refreshPending;
+    refreshPending = false;
+    scheduleNextRefresh(pending ? 0 : undefined);
   }
+  })();
+  return refreshPromise;
 }
 function renderAccounts() {
   const stamp = JSON.stringify(accountData);
@@ -1069,13 +1108,17 @@ function choose(id) {
     currentPlanPreview = null;
     planRequestId = null;
     currentCatalog = null;
-    selectedCatalogSources.clear();
-    selectedCatalogArtifacts.clear();
+    selectedCatalogSources = new Set();
+    selectedCatalogArtifacts = new Set();
     catalogRequestSeq++;
+    matrixRequestSeq++;
     catalogLoadError = null;
   }
   selected = id;
-  localStorage.setItem('selected-book', id);
+  try {
+    if (id) localStorage.setItem('selected-book', id);
+    else localStorage.removeItem('selected-book');
+  } catch (_) {}
   lastRender = '';
   render();
   loadCatalog(id);
@@ -1085,9 +1128,12 @@ function choose(id) {
 async function openExplorer() {
   lastFocusedElement = document.activeElement;
   viewingExplorer = true;
+  catalogRequestSeq++;
+  matrixRequestSeq++;
+  renderCatalogStatus();
   lastRender = '';
   render();
-  setTimeout(() => $('explorer-title')?.focus(), 50);
+  if (viewingExplorer) $('explorer-title')?.focus();
   await loadRemoteBooks();
 }
 function closeExplorer() {
@@ -1265,7 +1311,7 @@ async function downloadRemoteAudios() {
     });
     viewingExplorer = false;
     selected = res.bookId;
-    localStorage.setItem('selected-book', selected);
+    try { localStorage.setItem('selected-book', selected); } catch (_) {}
     notice(`${artifactIds.length} audios añadidos a la cola. Se descargarán y convertirán a MP3 uno a uno.`);
     lastRender = '';
     await refresh();
@@ -1306,7 +1352,7 @@ function getActiveStatus() {
       : st === 'source_processing' ? 'Procesando fuente'
       : st === 'submitting' ? 'Solicitando audio'
       : st === 'queued' ? 'En cola de Google'
-      : 'Generando audio';
+      : 'Generando';
     action = `${book.title} · ${verb} audio ${activeBlock.number} de ${book.blocks.length}: «${activeBlock.title}»`;
     dotClass += ' active';
     isLive = true;
@@ -1450,7 +1496,7 @@ function render() {
       : st === 'source_processing' ? 'Procesando fuente'
       : st === 'submitting' ? 'Solicitando audio'
       : st === 'queued' ? 'En cola de Google'
-      : 'Generando audio';
+      : 'Generando';
     actionText = `${verb} audio ${activeBlock.number} de ${book.blocks.length}: «${activeBlock.title}»`;
     pulseClass += ' active';
   } else if (book.quotaError || book.blocks.some(b => b.state === 'quota')) {
@@ -1618,7 +1664,9 @@ $('create-form').addEventListener('submit',event=>{
   $('create-button').disabled=true;
   act(async()=>{
     const book=await api('/api/books',{method:'POST',data:{title:$('book-title').value,requestId:createRequest}});
-    viewingExplorer = false; selected=book.id; localStorage.setItem('selected-book',selected); $('book-title').value=''; createRequest=crypto.randomUUID(); notice('Libro registrado. Se está creando en NotebookLM.');
+    viewingExplorer = false; selected=book.id;
+    try { localStorage.setItem('selected-book',selected); } catch (_) {}
+    $('book-title').value=''; createRequest=crypto.randomUUID(); notice('Libro registrado. Se está creando en NotebookLM.');
   }).finally(()=>{$('create-button').disabled=false;});
 });
 $('book-title').addEventListener('input',()=>{createRequest=crypto.randomUUID();});
@@ -1676,17 +1724,21 @@ function uploadFileWithProgress(url, file, authToken, onProgress) {
         if (e.lengthComputable && e.total > 0) {
           const percent = Math.min(100, Math.round((e.loaded / e.total) * 100));
           onProgress(percent, e.loaded, e.total);
-        }
+        } else onProgress(null);
       });
+      xhr.upload.addEventListener('load', () => onProgress(100));
     }
 
     xhr.onload = () => {
-      let data = {};
-      try { data = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
+      let data;
+      try { data = JSON.parse(xhr.responseText); }
+      catch (_) { reject(new Error('Respuesta JSON inválida al guardar el archivo.')); return; }
       if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(data);
+        if (!data || typeof data.id !== 'string' || !data.id) {
+          reject(new Error('El servidor no confirmó el archivo guardado.'));
+        } else resolve(data);
       } else {
-        reject(new Error(data.error || `Error ${xhr.status} al subir el archivo.`));
+        reject(new Error(data?.error || `Error ${xhr.status} al subir el archivo.`));
       }
     };
 
@@ -1746,6 +1798,7 @@ async function addFiles(list) {
   }
 
   if (!validFiles.length) {
+    if (card) card.hidden = true;
     if ($('files')) $('files').value = '';
     notice(`No se subieron archivos. ${rejectedFiles.length} archivo(s) descartado(s) por validación.`, true);
     return;
@@ -1756,10 +1809,10 @@ async function addFiles(list) {
 
   if (card && progressList) {
     card.hidden = false;
-    if (titleEl) titleEl.textContent = `Cargando ${validFiles.length} archivo(s)…`;
+    if (titleEl) titleEl.textContent = `Guardando ${validFiles.length} archivo(s) en «${books.find(b => b.id === bookId)?.title || bookId}»…`;
   }
 
-  const rowEls = new Map();
+  const rowEls = [];
   if (progressList) {
     progressList.replaceChildren(...validFiles.map((file, idx) => {
       const row = el('div', { class: 'upload-item-row' });
@@ -1769,11 +1822,11 @@ async function addFiles(list) {
         el('span', { class: 'upload-item-name' }, file.name),
         el('span', { class: 'upload-item-status' }, idx === 0 ? 'Iniciando…' : 'En espera…')
       );
-      const barWrap = el('div', { class: 'upload-item-bar' });
-      const fill = el('span', { class: 'upload-item-fill', style: 'width: 0%' });
+      const barWrap = el('div', { class: 'upload-item-progress', role: 'progressbar', 'aria-label': `Transferencia local de ${file.name}`, 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0' });
+      const fill = el('div', { class: 'upload-item-progress-fill' });
       barWrap.append(fill);
       row.append(meta, barWrap);
-      rowEls.set(file.name, { row, meta, statusEl: meta.lastChild, fill });
+      rowEls.push({ row, meta, statusEl: meta.lastChild, fill, barWrap });
       return row;
     }));
   }
@@ -1784,7 +1837,7 @@ async function addFiles(list) {
   try {
     for (let i = 0; i < validFiles.length; i++) {
       const file = validFiles[i];
-      const ui = rowEls.get(file.name);
+      const ui = rowEls[i];
       if (ui) {
         ui.statusEl.textContent = 'Subiendo… 0%';
         ui.row.classList.add('uploading');
@@ -1795,22 +1848,24 @@ async function addFiles(list) {
         const uploadUrl = `/api/books/${bookId}/files?filename=${encodeURIComponent(file.name)}&requestId=${crypto.randomUUID()}`;
         const result = await uploadFileWithProgress(uploadUrl, file, token, (percent) => {
           if (ui) {
-            ui.fill.style.width = `${percent}%`;
-            ui.statusEl.textContent = `Subiendo… ${percent}%`;
+            ui.fill.style.width = `${percent ?? 0}%`;
+            if (percent === null) ui.barWrap.removeAttribute('aria-valuenow');
+            else ui.barWrap.setAttribute('aria-valuenow', String(percent));
+            ui.statusEl.textContent = percent === 100 ? 'Confirmando guardado local…' : percent === null ? 'Transfiriendo…' : `Transfiriendo… ${percent}%`;
           }
         });
 
+        if (result.duplicate || result.existing) duplicates++; else added++;
         if (ui) {
           ui.fill.style.width = '100%';
+          ui.barWrap.setAttribute('aria-valuenow', '100');
           ui.row.classList.remove('uploading');
           if (result.duplicate || result.existing) {
             ui.row.classList.add('duplicate');
             ui.statusEl.textContent = 'Duplicado (omitido)';
-            duplicates++;
           } else {
             ui.row.classList.add('done');
-            ui.statusEl.textContent = 'Listo';
-            added++;
+            ui.statusEl.textContent = 'Guardado localmente';
           }
         }
       } catch (err) {
@@ -1826,6 +1881,7 @@ async function addFiles(list) {
     uploading = false;
     if ($('files')) $('files').value = '';
     lastRender = '';
+    render();
     if (card && titleEl) {
       titleEl.textContent = `Carga finalizada: ${added} añadido(s)${duplicates ? `, ${duplicates} duplicado(s)` : ''}${errors.length ? `, ${errors.length} error(es)` : ''}.`;
     }
@@ -1862,28 +1918,35 @@ function openDeleteModal(book, artifactId, title) {
 }
 
 function normalizeCatalogResponse(data, expectedBookId) {
-  if (!data || typeof data !== 'object') return null;
-  const book = data.book || { id: expectedBookId };
-  const bookId = book.id || expectedBookId;
-  const rawItems = Array.isArray(data.items) ? data.items : [];
+  if (!data?.book?.id || data.book.id !== expectedBookId || !Array.isArray(data.items)) {
+    throw new Error('Respuesta de catálogo inválida o de otro libro.');
+  }
+  const book = data.book;
+  const bookId = book.id;
+  const rawItems = data.items;
 
   const artifacts = [];
   const sources = [];
   const notes = [];
 
   for (const item of rawItems) {
+    if (!item || !['artifact', 'source', 'note'].includes(item.kind)) continue;
+    let sourceIds = item.sourceIds || [];
+    if (item.source_ids_json) {
+      try { sourceIds = JSON.parse(item.source_ids_json); } catch (_) { sourceIds = []; }
+    }
     const normalized = {
       id: item.id,
       remoteId: item.remote_id || item.remoteId,
       kind: item.kind,
-      type: item.type || (item.kind === 'note' ? 'note' : item.kind === 'source' ? 'source' : 'audio'),
+      type: item.type || (item.kind === 'note' ? 'note' : item.kind === 'source' ? 'source' : 'unknown'),
       title: item.title || (item.kind === 'note' ? 'Nota' : item.kind === 'source' ? 'Fuente' : 'Contenido'),
       status: item.status,
       createdAt: item.created_time || item.createdAt || item.createdTime || null,
       modifiedAt: item.modified_time || item.modifiedAt || item.modifiedTime || null,
       notVisible: !!(item.not_visible ?? item.notVisible),
       errorReason: item.error_reason || item.errorReason || null,
-      sourceIds: item.source_ids_json ? JSON.parse(item.source_ids_json || '[]') : (item.sourceIds || [])
+      sourceIds: Array.isArray(sourceIds) ? sourceIds : []
     };
 
     if (item.kind === 'source') {
@@ -1905,7 +1968,22 @@ function normalizeCatalogResponse(data, expectedBookId) {
   };
 }
 
+function catalogItemAvailable(item) {
+  return !!item.remoteId && !item.notVisible && !['deleted_confirmed', 'delete_uncertain', 'reappeared'].includes(item.status);
+}
+function catalogItemReady(item) {
+  return catalogItemAvailable(item) && ['ready', 'completed', 2, '2'].includes(item.status);
+}
+function renderCatalogStatus() {
+  const box = $('catalog-error');
+  if (!box) return;
+  box.hidden = viewingExplorer || !catalogLoadError;
+  $('catalog-error-text').textContent = catalogLoadError ? `No se pudo actualizar el catálogo. ${catalogLoadError}${currentCatalog?.bookId === selected ? ' Se muestran datos anteriores.' : ''}` : '';
+}
+$('catalog-retry')?.addEventListener('click', () => loadCatalog(selected));
+
 async function loadCatalog(bookId) {
+  renderCatalogStatus();
   if (!bookId) {
     $('catalog-section').hidden = true;
     currentCatalog = null;
@@ -1918,35 +1996,45 @@ async function loadCatalog(bookId) {
     return;
   }
 
+  const pending = catalogLoads.get(bookId);
+  if (pending?.seq === catalogRequestSeq) return pending.promise;
   const seq = ++catalogRequestSeq;
+  const operation = (async () => {
   try {
-    const data = await api(`/api/books/${bookId}/catalog`);
-    if (seq !== catalogRequestSeq || selected !== bookId || viewingExplorer) return;
+    const data = await api(`/api/books/${bookId}/catalog`, { timeout: 15000 });
+    if (seq !== catalogRequestSeq || selected !== bookId || viewingExplorer || refreshStopped) return;
     currentCatalog = normalizeCatalogResponse(data, bookId);
     catalogLoadError = null;
     lastCatalogLoadTime = Date.now();
 
-    const validArtIds = new Set(currentCatalog.artifacts.map(a => a.id));
+    const validArtIds = new Set(currentCatalog.artifacts.filter(catalogItemReady).map(a => a.id));
     for (const id of selectedCatalogArtifacts) {
       if (!validArtIds.has(id)) selectedCatalogArtifacts.delete(id);
     }
-    const validSrcIds = new Set(currentCatalog.sources.map(s => s.remoteId || s.id));
+    const validSrcIds = new Set(currentCatalog.sources.filter(catalogItemReady).map(s => s.remoteId));
     for (const id of selectedCatalogSources) {
       if (!validSrcIds.has(id)) selectedCatalogSources.delete(id);
     }
 
     renderCatalog();
   } catch (e) {
-    if (seq !== catalogRequestSeq || selected !== bookId || viewingExplorer) return;
+    if (seq !== catalogRequestSeq || selected !== bookId || viewingExplorer || refreshStopped) return;
     catalogLoadError = e.message;
     if (!currentCatalog) {
       $('catalog-section').hidden = true;
     }
+  } finally {
+    if (catalogLoads.get(bookId)?.seq === seq) catalogLoads.delete(bookId);
+    renderCatalogStatus();
   }
+  })();
+  catalogLoads.set(bookId, { seq, promise: operation });
+  return operation;
 }
 
 function renderCatalog() {
-  if (!currentCatalog || !selected) {
+  renderCatalogStatus();
+  if (!currentCatalog || currentCatalog.bookId !== selected || viewingExplorer) {
     $('catalog-section').hidden = true;
     return;
   }
@@ -1956,6 +2044,13 @@ function renderCatalog() {
     return;
   }
   $('catalog-section').hidden = false;
+  const stamp = JSON.stringify([currentCatalog, [...selectedCatalogSources], [...selectedCatalogArtifacts]]);
+  if (stamp === lastCatalogRenderStamp) return;
+  lastCatalogRenderStamp = stamp;
+  const focused = document.activeElement;
+  const focusedRow = focused?.closest('#catalog-section tr');
+  const focusedItem = focusedRow?.dataset.catalogId;
+  const focusedControl = focusedRow ? [...focusedRow.querySelectorAll('input,button,a')].indexOf(focused) : -1;
 
   const artifacts = currentCatalog.artifacts || [];
   const sources = currentCatalog.sources || [];
@@ -1971,7 +2066,9 @@ function renderCatalog() {
   artEmpty.hidden = artifacts.length > 0;
   artTbody.hidden = artifacts.length === 0;
 
-  $('select-all-artifacts').checked = artifacts.length > 0 && artifacts.every(a => selectedCatalogArtifacts.has(a.id));
+  const readyArtifacts = artifacts.filter(catalogItemReady);
+  $('select-all-artifacts').checked = readyArtifacts.length > 0 && readyArtifacts.every(a => selectedCatalogArtifacts.has(a.id));
+  $('select-all-artifacts').disabled = readyArtifacts.length === 0;
   $('download-selected-artifacts-btn').disabled = selectedCatalogArtifacts.size === 0;
   $('download-selected-artifacts-btn').textContent = selectedCatalogArtifacts.size > 0
     ? `Descargar seleccionados (${selectedCatalogArtifacts.size})`
@@ -1979,12 +2076,14 @@ function renderCatalog() {
 
   artTbody.replaceChildren(...artifacts.map(a => {
     const tr = el('tr');
+    tr.dataset.catalogId = a.id;
     if (a.notVisible) tr.classList.add('item-not-visible');
 
     const tdCheck = el('td');
     const cb = el('input', {
       type: 'checkbox',
       checked: selectedCatalogArtifacts.has(a.id),
+      disabled: !catalogItemReady(a),
       'aria-label': `Seleccionar artefacto ${a.title}`
     });
     cb.addEventListener('change', () => {
@@ -1999,7 +2098,7 @@ function renderCatalog() {
     if (a.createdAt) tdTitle.append(el('small', { class: 'source-name' }, `Creado: ${safeDate(a.createdAt)}`));
 
     const tdType = el('td');
-    tdType.append(el('span', { class: `badge ${a.type}` }, a.type || 'audio'));
+    tdType.append(el('span', { class: `badge ${a.type}` }, a.type || 'desconocido'));
 
     const tdRemoteId = el('td');
     if (a.remoteId) {
@@ -2010,17 +2109,17 @@ function renderCatalog() {
 
     const tdState = el('td');
     if (a.notVisible) {
-      tdState.append(el('span', { class: 'badge waiting_quota', title: 'No visible en NotebookLM o archivado' }, 'Archivado'));
+      tdState.append(el('span', { class: 'badge waiting_quota' }, 'No visible en la última sincronización'));
     } else {
       const isReady = a.status === 'completed' || a.status === 'ready';
       const isFailed = a.status === 'failed';
       tdState.append(el('span', { class: `badge ${isReady ? 'done' : isFailed ? 'error' : 'generating'}` },
-        isReady ? 'Completado' : isFailed ? 'Error' : 'Generando'));
+        isReady ? 'Completado' : isFailed ? 'Error' : (['generating', 'queued', 'submitting', 'processing'].includes(a.status) ? 'Generando' : String(a.status || 'Estado desconocido'))));
     }
     if (a.errorReason) tdState.append(el('div', { class: 'block-error' }, a.errorReason));
 
     const tdAction = el('td');
-    const canDownload = ['completed', 'ready'].includes(a.status);
+    const canDownload = catalogItemReady(a);
     if (canDownload) {
       tdAction.append(el('button', {
         class: 'quiet link-button',
@@ -2036,11 +2135,12 @@ function renderCatalog() {
       }, 'Descargar'));
     }
 
-    const deleteTargetId = a.remoteId || a.id;
+    const deleteTargetId = a.remoteId;
     tdAction.append(el('button', {
       class: 'quiet retry',
       style: 'color: #dc2626; margin-top: 4px;',
       type: 'button',
+      disabled: !catalogItemAvailable(a),
       onclick: () => openDeleteModal(book, deleteTargetId, a.title)
     }, 'Eliminar de NotebookLM…'));
 
@@ -2054,7 +2154,8 @@ function renderCatalog() {
   srcEmpty.hidden = sources.length > 0;
   srcTbody.hidden = sources.length === 0;
 
-  const validSources = sources.filter(s => !!s.remoteId);
+  const validSources = sources.filter(catalogItemReady);
+  $('select-all-sources').disabled = validSources.length === 0;
   $('select-all-sources').checked = validSources.length > 0 && validSources.every(s => selectedCatalogSources.has(s.remoteId));
   $('generate-from-sources-btn').disabled = selectedCatalogSources.size === 0;
   $('generate-from-sources-btn').textContent = selectedCatalogSources.size > 0
@@ -2063,6 +2164,7 @@ function renderCatalog() {
 
   srcTbody.replaceChildren(...sources.map(s => {
     const tr = el('tr');
+    tr.dataset.catalogId = s.id;
     if (s.notVisible) tr.classList.add('item-not-visible');
 
     const tdCheck = el('td');
@@ -2070,7 +2172,7 @@ function renderCatalog() {
     const cb = el('input', {
       type: 'checkbox',
       checked: selectedCatalogSources.has(srcKey),
-      disabled: !s.remoteId,
+      disabled: !catalogItemReady(s),
       'aria-label': `Seleccionar fuente ${s.title}`
     });
     cb.addEventListener('change', () => {
@@ -2089,12 +2191,12 @@ function renderCatalog() {
 
     const tdState = el('td');
     if (s.notVisible) {
-      tdState.append(el('span', { class: 'badge waiting_quota' }, 'Archivado'));
+      tdState.append(el('span', { class: 'badge waiting_quota' }, 'No visible en la última sincronización'));
     } else {
-      const isReady = s.status === 2 || s.status === 'ready';
-      const isFailed = s.status === 3 || s.status === 'failed';
+      const isReady = ['ready', 'completed', 2, '2'].includes(s.status);
+      const isFailed = ['failed', 3, '3'].includes(s.status);
       tdState.append(el('span', { class: `badge ${isReady ? 'done' : isFailed ? 'error' : 'generating'}` },
-        isReady ? 'Lista' : isFailed ? 'Error' : 'Procesando'));
+        isReady ? 'Lista' : isFailed ? 'Error' : (['processing', 'queued'].includes(s.status) ? 'Procesando' : String(s.status || 'Estado desconocido'))));
     }
 
     tr.append(tdCheck, tdTitle, tdId, tdState);
@@ -2114,19 +2216,24 @@ function renderCatalog() {
     const tdTitle = el('td', {}, n.title || 'Nota');
     const tdId = el('td');
     tdId.append(el('code', {}, n.remoteId || n.id || '—'));
-    const tdContent = el('td', {}, n.content ? (n.content.slice(0, 100) + (n.content.length > 100 ? '…' : '')) : '—');
+    const tdContent = el('td', {}, 'Contenido no disponible en la caché');
     tr.append(tdTitle, tdId, tdContent);
     return tr;
   }));
+  if (focusedItem && focusedControl >= 0) {
+    const row = [...$('catalog-section').querySelectorAll('tr')].find(row => row.dataset.catalogId === focusedItem);
+    row?.querySelectorAll('input,button,a')[focusedControl]?.focus();
+  }
 }
 
 $('sync-content-btn')?.addEventListener('click', () => {
   if (!selected) return;
+  const bookId = selected;
   act(async () => {
     notice('Sincronizando catálogo con NotebookLM…');
-    await api(`/api/books/${selected}/sync`, { method: 'POST' });
+    await api(`/api/books/${bookId}/sync`, { method: 'POST' });
     notice('Catálogo sincronizado.');
-    await loadCatalog(selected);
+    if (selected === bookId && !viewingExplorer) await loadCatalog(bookId);
   });
 });
 
@@ -2167,53 +2274,63 @@ $('tab-notes')?.addEventListener('click', () => {
 });
 
 $('select-all-artifacts')?.addEventListener('change', (e) => {
-  const artifacts = currentCatalog?.artifacts || [];
+  const artifacts = currentCatalog?.bookId === selected ? currentCatalog.artifacts.filter(catalogItemReady) : [];
   if (e.target.checked) selectedCatalogArtifacts = new Set(artifacts.map(a => a.id));
   else selectedCatalogArtifacts.clear();
   renderCatalog();
 });
 $('download-selected-artifacts-btn')?.addEventListener('click', () => {
-  if (!selected || !selectedCatalogArtifacts.size) return;
+  if (!selected || currentCatalog?.bookId !== selected || viewingExplorer) return;
+  const bookId = selected;
+  const selection = selectedCatalogArtifacts;
+  const items = currentCatalog.artifacts.filter(a => selection.has(a.id) && catalogItemReady(a)).map(a => ({ itemId: a.id }));
+  if (!items.length) return;
   act(async () => {
     notice(`Solicitando descarga de ${selectedCatalogArtifacts.size} contenidos…`);
-    const items = [...selectedCatalogArtifacts].map(id => ({ itemId: id }));
-    const res = await api(`/api/books/${selected}/downloads`, {
+    const res = await api(`/api/books/${bookId}/downloads`, {
       method: 'POST',
       data: { items }
     });
     notice(`${res.accepted.length} descargas aceptadas.${res.rejected.length ? ` ${res.rejected.length} rechazadas.` : ''}`);
-    selectedCatalogArtifacts.clear();
-    renderCatalog();
+    if (selected === bookId && selectedCatalogArtifacts === selection) {
+      for (const item of [...(res.accepted || []), ...(res.existing || [])]) selection.delete(item.id);
+      renderCatalog();
+    }
   });
 });
 
 $('select-all-sources')?.addEventListener('change', (e) => {
-  const sources = (currentCatalog?.sources || []).filter(s => !!s.remoteId);
+  const sources = currentCatalog?.bookId === selected ? currentCatalog.sources.filter(catalogItemReady) : [];
   if (e.target.checked) selectedCatalogSources = new Set(sources.map(s => s.remoteId));
   else selectedCatalogSources.clear();
   renderCatalog();
 });
 $('generate-from-sources-btn')?.addEventListener('click', () => {
-  if (!selected || !selectedCatalogSources.size) return;
+  if (!selected || currentCatalog?.bookId !== selected || viewingExplorer) return;
+  const bookId = selected;
+  const selection = selectedCatalogSources;
+  const sourceIds = currentCatalog.sources.filter(s => selection.has(s.remoteId) && catalogItemReady(s)).map(s => s.remoteId);
+  if (!sourceIds.length) return;
   act(async () => {
     notice(`Generando audios para ${selectedCatalogSources.size} fuentes seleccionadas…`);
-    const sourceIds = [...selectedCatalogSources];
-    const res = await api(`/api/books/${selected}/generations`, {
+    const res = await api(`/api/books/${bookId}/generations`, {
       method: 'POST',
       data: { sourceIds, mode: $('generation-mode')?.value || 'immediate' }
     });
     notice(`${res.queued.length} bloques añadidos a la cola de generación.`);
-    selectedCatalogSources.clear();
-    renderCatalog();
+    if (selected === bookId && selectedCatalogSources === selection) {
+      for (const id of sourceIds) selection.delete(id);
+      renderCatalog();
+    }
   });
 });
 
 $('delete-modal-form')?.addEventListener('submit', async (e) => {
   e.preventDefault();
-  $('delete-modal').close();
-  if (!pendingDeleteTarget) return;
+  if (!$('delete-modal').open || !pendingDeleteTarget) return;
   const { book, artifactId, title } = pendingDeleteTarget;
   pendingDeleteTarget = null;
+  $('delete-modal').close();
   notice(`Solicitando eliminación de «${title}» de NotebookLM…`);
   try {
     const res = await api(`/api/books/${book.id}/artifacts/${encodeURIComponent(artifactId)}/delete`, {
@@ -2236,20 +2353,28 @@ $('delete-modal-cancel')?.addEventListener('click', () => {
   $('delete-modal').close();
 });
 $('delete-modal')?.addEventListener('close', () => {
-  if (lastDialogTrigger && typeof lastDialogTrigger.focus === 'function') {
+  pendingDeleteTarget = null;
+  if (lastDialogTrigger?.isConnected && typeof lastDialogTrigger.focus === 'function') {
     lastDialogTrigger.focus();
     lastDialogTrigger = null;
   }
 });
+$('delete-modal')?.addEventListener('cancel', () => { pendingDeleteTarget = null; });
 
 async function loadRecipes() {
+  if (recipesPromise) return recipesPromise;
+  recipesPromise = (async () => {
   try {
-    const res = await api('/api/recipes');
+    const res = await api('/api/recipes', { timeout: 15000 });
     recipes = res.recipes || [];
+    recipesLoaded = true;
     renderRecipes();
   } catch (e) {
     console.error('Error cargando recetas:', e);
+    recipesLoaded = false;
   }
+  })();
+  try { await recipesPromise; } finally { recipesPromise = null; }
 }
 
 function renderRecipes() {
@@ -2268,24 +2393,35 @@ function renderRecipes() {
 }
 
 async function loadMatrix(bookId) {
-  const seq = ++matrixRequestSeq;
   if (!bookId) {
+    matrixRequestSeq++;
     currentMatrix = null;
     return;
   }
+  const page = matrixPage;
+  const key = `${bookId}:${page}`;
+  const pending = matrixLoads.get(key);
+  if (pending?.seq === matrixRequestSeq) return pending.promise;
+  const seq = ++matrixRequestSeq;
+  const operation = (async () => {
   try {
-    const data = await api(`/api/books/${bookId}/matrix?page=${matrixPage}`);
-    if (seq !== matrixRequestSeq || selected !== bookId || viewingExplorer) return;
+    const data = await api(`/api/books/${bookId}/matrix?page=${page}`, { timeout: 15000 });
+    if (seq !== matrixRequestSeq || selected !== bookId || matrixPage !== page || viewingExplorer || refreshStopped) return;
     currentMatrix = data;
     renderMatrix();
   } catch (e) {
-    if (seq !== matrixRequestSeq || selected !== bookId || viewingExplorer) return;
+    if (seq !== matrixRequestSeq || selected !== bookId || matrixPage !== page || viewingExplorer || refreshStopped) return;
     notice(`No se pudo actualizar la matriz. ${e.message}`, true);
+  } finally {
+    if (matrixLoads.get(key)?.seq === seq) matrixLoads.delete(key);
   }
+  })();
+  matrixLoads.set(key, { seq, promise: operation });
+  return operation;
 }
 
 function renderMatrix() {
-  if (activeViewTab !== 'matrix' || !selected) return;
+  if (activeViewTab !== 'matrix' || !selected || !books.some(b => b.id === selected)) return;
   const bar = $('material-metrics-bar');
   const reasonBox = $('waiting-reason-box');
   const tbody = $('matrix-body');
@@ -2507,7 +2643,8 @@ $('infographic-full-image')?.addEventListener('error', () => {
 $('infographic-modal')?.addEventListener('close', () => $('infographic-full-image').removeAttribute('src'));
 
 async function openPlanPreview() {
-  if (!selected) return;
+  if (!selected || planConfirming || planPreviewLoading || $('plan-modal').open) return;
+  planPreviewLoading = true;
   lastDialogTrigger = document.activeElement;
   const bookId = selected;
   const recipeId = $('recipe-selector')?.value || 'study-book';
@@ -2525,6 +2662,8 @@ async function openPlanPreview() {
     notice('');
   } catch (e) {
     notice(`Error al calcular plan: ${e.message}`, true);
+  } finally {
+    planPreviewLoading = false;
   }
 }
 
@@ -2569,9 +2708,12 @@ function renderPlanModal(plan) {
 }
 
 async function confirmPlan() {
-  if (!selected || !currentPlanPreview || currentPlanPreview.bookId !== selected) return;
+  if (planConfirming || !selected || !currentPlanPreview || currentPlanPreview.bookId !== selected) return;
   const plan = currentPlanPreview;
+  const requestId = planRequestId;
+  planConfirming = true;
   $('plan-modal-confirm').disabled = true;
+  $('plan-modal-cancel').disabled = true;
   notice('Confirmando plan de producción…');
   try {
     const res = await api(`/api/books/${plan.bookId}/plan/confirm`, {
@@ -2579,7 +2721,7 @@ async function confirmPlan() {
       data: {
         recipeId: plan.recipeId,
         recipeVersion: plan.recipeVersion,
-        requestId: planRequestId
+        requestId
       }
     });
     $('plan-modal').close();
@@ -2591,22 +2733,31 @@ async function confirmPlan() {
   } catch (e) {
     notice(`Error al confirmar plan: ${e.message}`, true);
   } finally {
+    planConfirming = false;
     $('plan-modal-confirm').disabled = false;
+    $('plan-modal-cancel').disabled = false;
   }
 }
 
 $('prepare-plan-btn')?.addEventListener('click', openPlanPreview);
 $('plan-modal-confirm')?.addEventListener('click', confirmPlan);
 $('plan-modal-cancel')?.addEventListener('click', () => {
+  if (planConfirming) return;
   $('plan-modal').close();
   currentPlanPreview = null;
   planRequestId = null;
 });
 $('plan-modal')?.addEventListener('close', () => {
-  if (lastDialogTrigger && typeof lastDialogTrigger.focus === 'function') {
+  currentPlanPreview = null;
+  planRequestId = null;
+  if (lastDialogTrigger?.isConnected && typeof lastDialogTrigger.focus === 'function') {
     lastDialogTrigger.focus();
     lastDialogTrigger = null;
   }
+});
+$('plan-modal')?.addEventListener('cancel', e => {
+  if (planConfirming) e.preventDefault();
+  else { currentPlanPreview = null; planRequestId = null; }
 });
 
 for (const [id, delta] of [['matrix-prev-page', -1], ['matrix-next-page', 1]]) {
@@ -2620,6 +2771,7 @@ $('tab-view-matrix')?.addEventListener('click', () => {
   activeViewTab = 'matrix';
   lastRender = '';
   render();
+  loadMatrix(selected);
 });
 $('tab-view-blocks')?.addEventListener('click', () => {
   activeViewTab = 'blocks';
@@ -2651,15 +2803,18 @@ $('library-next-page')?.addEventListener('click', () => {
 
 const THEME_STORAGE_KEY = 'bloqueaudio_theme_v1';
 
+$('sidebar-toggle')?.addEventListener('click', () => {
+  const open = document.querySelector('.sidebar').classList.toggle('is-open');
+  $('sidebar-toggle').setAttribute('aria-expanded', String(open));
+});
+
 function applyTheme(theme) {
+  theme = ['system', 'light', 'dark'].includes(theme) ? theme : 'system';
   const root = document.documentElement;
-  if (theme === 'dark') {
-    root.setAttribute('data-theme', 'dark');
-  } else if (theme === 'light') {
-    root.setAttribute('data-theme', 'light');
-  } else {
-    root.removeAttribute('data-theme');
-  }
+  const dark = theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  root.dataset.theme = dark ? 'dark' : 'light';
+  root.style.removeProperty('color-scheme');
+  if ($('theme-selector')) $('theme-selector').value = theme;
 }
 
 function initTheme() {
@@ -2705,11 +2860,24 @@ function initTheme() {
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
     scheduleImmediateRefresh();
-  }
+  } else if (!refreshing) scheduleNextRefresh();
 });
 
 window.addEventListener('online', () => {
   consecutiveRefreshErrors = 0;
+  scheduleImmediateRefresh();
+});
+window.addEventListener('pagehide', () => {
+  refreshStopped = true;
+  refreshPending = false;
+  clearTimeout(refreshTimeout);
+  refreshTimeout = null;
+  clearTimeout(noticeDismissTimer);
+  noticeDismissTimer = null;
+  for (const controller of timedReadControllers) controller.abort();
+});
+window.addEventListener('pageshow', () => {
+  refreshStopped = false;
   scheduleImmediateRefresh();
 });
 
