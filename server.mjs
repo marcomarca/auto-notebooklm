@@ -104,7 +104,7 @@ function requestId(value) {
   return value;
 }
 
-export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultExportsDir, gate, provider, accountFactory, port = Number(process.env.PORT || 4318), worker = true, check = true, allowHttpShutdown = true } = {}) {
+export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultExportsDir, gate, provider, accountFactory, port = Number(process.env.PORT || 4318), worker = true, check = true, allowHttpShutdown = true, shutdownHandler } = {}) {
   await mkdir(dataDir, { recursive: true });
   const releaseLock = await acquireLock(dataDir);
   let store;
@@ -116,7 +116,7 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
     provider.gate = connectorGate;
   }
   const accounts = new Accounts(store, provider, { factory: accountFactory, gate: connectorGate });
-  const queue = new Queue(store, provider, { dataDir, exportsDir, accounts, gate: connectorGate });
+  const queue = new Queue(store, provider, { dataDir, exportsDir, accounts, gate: connectorGate, shutdownHandler });
   const token = randomBytes(32).toString('hex');
   let origin, closed = false, shutdown, initialization;
   const completion = Promise.withResolvers();
@@ -213,7 +213,34 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
         });
         return;
       }
-      if (req.method === 'GET' && url.pathname === '/api/health') return send(res, 200, { ...accounts.get(accounts.current).health, app: 'BloqueAudio', appVersion, mode, token, busy: queue.busy });
+      if (req.method === 'GET' && url.pathname === '/api/health') {
+        return send(res, 200, {
+          ...accounts.get(accounts.current).health,
+          app: 'BloqueAudio',
+          appVersion,
+          mode,
+          token,
+          busy: queue.busy,
+          shutdownOnDispatch: store.getSetting('shutdown_on_dispatch', '0') === '1',
+          shutdownStatus: queue.shutdownHandler ? queue.shutdownHandler.status() : null
+        });
+      }
+      if (parts[0] === 'api' && parts[1] === 'system' && parts[2] === 'shutdown') {
+        if (req.method === 'GET' && parts.length === 3) {
+          const enabled = store.getSetting('shutdown_on_dispatch', '0') === '1';
+          return send(res, 200, { enabled, ...queue.shutdownHandler.status() });
+        }
+        if (req.method === 'POST' && parts.length === 3) {
+          const payload = await body(req);
+          const enabled = Boolean(payload.enabled);
+          store.setSetting('shutdown_on_dispatch', enabled ? '1' : '0');
+          return send(res, 200, { ok: true, enabled, ...queue.shutdownHandler.status() });
+        }
+        if (req.method === 'POST' && parts[3] === 'cancel') {
+          const status = queue.cancelShutdown();
+          return send(res, 200, { ok: true, cancelled: true, enabled: false, ...status });
+        }
+      }
       if (req.method === 'POST' && url.pathname === '/api/health/check') {
         const h = await healthCheck();
         return send(res, 200, h);

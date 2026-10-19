@@ -452,6 +452,13 @@ export class Store {
   }
   all(sql, ...args) { return this.db.prepare(sql).all(...args); }
   get(sql, ...args) { return this.db.prepare(sql).get(...args); }
+  getSetting(key, defaultValue = null) {
+    const row = this.get('SELECT value FROM settings WHERE key=?', key);
+    return row ? row.value : defaultValue;
+  }
+  setSetting(key, value) {
+    this.db.prepare("INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, String(value));
+  }
   transaction(fn) {
     if (this.inTransaction) return fn();
     this.inTransaction = true;

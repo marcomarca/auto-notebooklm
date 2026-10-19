@@ -2,6 +2,7 @@ import { mkdir, stat } from 'node:fs/promises';
 import { join, basename } from 'node:path';
 import { safeName, exportDirName, formatBlockOutputName } from './store.mjs';
 import { ProviderError, redact } from './provider.mjs';
+import { SystemShutdown } from './system-shutdown.mjs';
 
 const thirtyMinutes = 30 * 60 * 1000;
 export function quotaRetry(usage, now = Date.now()) {
@@ -15,10 +16,11 @@ function readySource(row) { return row?.status === 2 || ['ready', 'completed'].i
 function exists(file) { return stat(file).then(s => s.size > 128, () => false); }
 
 export class Queue {
-  constructor(store, provider, { dataDir, exportsDir, now = Date.now, accounts } = {}) {
+  constructor(store, provider, { dataDir, exportsDir, now = Date.now, accounts, shutdownHandler } = {}) {
     this.store = store; this.provider = provider; this.dataDir = dataDir; this.exportsDir = exportsDir; this.now = now;
     this.busy = false; this.stopped = false; this.active = null;
     this.accounts = accounts;
+    this.shutdownHandler = shutdownHandler || new SystemShutdown();
     this.controllers = new Map();
     store.recover();
   }
@@ -105,6 +107,49 @@ export class Queue {
       const tasksDone = !tasks.length || tasks.every(t => ['ready', 'canceled', 'failed'].includes(t.state));
       if (blocksDone && tasksDone) this.store.update('books', b.id, { running: 0 });
     }
+
+    this.checkShutdownOnDispatch();
+  }
+  checkShutdownOnDispatch() {
+    const enabled = this.store.getSetting('shutdown_on_dispatch', '0') === '1';
+    if (!enabled || this.shutdownHandler.active) return;
+
+    const books = this.store.books().filter(b => this.accounts || b.profile === this.provider.profile);
+    const runningBooks = books.filter(b => b.running);
+    if (!runningBooks.length) return;
+
+    for (const book of runningBooks) {
+      if (!book.remote_id) return;
+
+      const blocks = this.store.blocks(book.id);
+      const hasPendingUploads = blocks.some(b =>
+        !b.canceled_at && b.state !== 'canceled' &&
+        ['upload', 'source'].includes(b.stage)
+      );
+      if (hasPendingUploads) return;
+
+      const hasPendingGenerations = blocks.some(b =>
+        !b.canceled_at && !['done', 'canceled', 'review'].includes(b.state) &&
+        !(b.state === 'error' && b.attempts > 3) &&
+        b.stage === 'generate'
+      );
+      if (hasPendingGenerations) return;
+
+      const tasks = this.store.materialTasks(book.id, { currentOnly: true });
+      const hasPendingTasks = tasks.some(t =>
+        !t.canceled_at && !['ready', 'canceled', 'failed', 'review_required'].includes(t.state) &&
+        ['planned', 'queued', 'submitting'].includes(t.state) &&
+        t.type !== 'audio'
+      );
+      if (hasPendingTasks) return;
+    }
+
+    this.store.setSetting('shutdown_on_dispatch', '0');
+    this.shutdownHandler.trigger(60, 'BloqueAudio: Solicitudes enviadas a Google NotebookLM. Apagando el equipo en 60 segundos...');
+  }
+  cancelShutdown() {
+    this.store.setSetting('shutdown_on_dispatch', '0');
+    return this.shutdownHandler.cancel();
   }
   providerFor(book, block) {
     return this.accounts ? this.accounts.get(block?.generation_profile || book.profile) : this.provider;

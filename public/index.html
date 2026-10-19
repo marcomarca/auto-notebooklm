@@ -48,6 +48,15 @@
       <span id="update-banner-text">Buscando actualización…</span>
       <button id="update-install-button" class="update-install-btn" type="button" hidden>Reiniciar y actualizar</button>
     </div>
+    <div id="shutdown-banner" class="shutdown-banner" role="alert" hidden>
+      <div class="shutdown-banner-content">
+        <div class="shutdown-banner-info">
+          <span class="shutdown-icon" aria-hidden="true">⏻</span>
+          <span id="shutdown-banner-text">Todas las solicitudes fueron enviadas a Google NotebookLM. Apagando el equipo en <strong id="shutdown-countdown">60</strong> s…</span>
+        </div>
+        <button id="cancel-shutdown-button" class="cancel-shutdown-btn" type="button">Cancelar apagado</button>
+      </div>
+    </div>
     <div id="permanent-feedback" class="permanent-feedback" hidden>
       <div class="feedback-main">
         <span id="feedback-dot" class="feedback-dot"></span>
@@ -170,6 +179,10 @@
               <option value="immediate">Inmediato</option>
               <option value="later">Diferido</option>
             </select>
+          </label>
+          <label class="shutdown-toggle" title="Apagar el PC automáticamente una vez enviadas todas las solicitudes pendientes a Google">
+            <input type="checkbox" id="shutdown-on-dispatch">
+            <span>Apagar al solicitar</span>
           </label>
           <button id="pause" class="quiet">Pausar</button>
           <button id="generate">Iniciar cola</button>

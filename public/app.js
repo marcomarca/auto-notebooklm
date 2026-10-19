@@ -893,6 +893,59 @@ function showHealth(h) {
   $('profile-label').textContent = `Perfil: ${h.profile || 'default'}${h.version ? ` · ${h.version.replace('nlm version ','')}` : ''}`;
   $('login-hint').hidden = h.auth || !h.cli || h.errorCode !== 'AUTH_REQUIRED';
   $('login-hint').textContent = `nlm login -p ${h.profile || 'default'}`;
+  renderShutdownState(h);
+}
+function renderShutdownState(data) {
+  const toggle = $('shutdown-on-dispatch');
+  if (toggle && !toggle.matches(':focus')) {
+    toggle.checked = Boolean(data?.shutdownOnDispatch);
+  }
+  const banner = $('shutdown-banner');
+  const countdown = $('shutdown-countdown');
+  const status = data?.shutdownStatus;
+  if (!banner) return;
+  if (status && status.active) {
+    banner.hidden = false;
+    if (countdown) countdown.textContent = status.secondsLeft;
+  } else {
+    banner.hidden = true;
+  }
+}
+function initShutdownControl() {
+  const toggle = $('shutdown-on-dispatch');
+  const cancelBtn = $('cancel-shutdown-button');
+  if (toggle) {
+    toggle.addEventListener('change', async () => {
+      const enabled = toggle.checked;
+      try {
+        await api('/api/system/shutdown', { method: 'POST', data: { enabled } });
+        notice(enabled
+          ? 'Apagado automático activado al enviar todas las solicitudes a Google.'
+          : 'Apagado automático desactivado.',
+          'info'
+        );
+      } catch (err) {
+        toggle.checked = !enabled;
+        notice(`No se pudo actualizar el apagado automático: ${err.message}`, 'error');
+      }
+    });
+  }
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', async () => {
+      cancelBtn.disabled = true;
+      try {
+        await api('/api/system/shutdown/cancel', { method: 'POST' });
+        if (toggle) toggle.checked = false;
+        const banner = $('shutdown-banner');
+        if (banner) banner.hidden = true;
+        notice('Apagado del equipo cancelado con éxito.', 'info');
+      } catch (err) {
+        notice(`Error al cancelar el apagado: ${err.message}`, 'error');
+      } finally {
+        cancelBtn.disabled = false;
+      }
+    });
+  }
 }
 function hasPendingActivity() {
   if (uploading || accountData.loginProfile) return true;
@@ -2931,6 +2984,7 @@ function initDesktopUpdates() {
   window.desktop.getUpdateState?.().then(renderUpdateState).catch(() => {});
   window.desktop.onUpdateState?.(renderUpdateState);
 }
+initShutdownControl();
 initDesktopUpdates();
 studioPlayer.init();
 window.studioPlayer = studioPlayer;
