@@ -1008,7 +1008,14 @@ export async function makeApp({ dataDir = defaultDataDir, exportsDir = defaultEx
         }
       }
       if (req.method === 'GET') {
-        const assets = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/icon.svg': ['icon.svg', 'image/svg+xml'], '/favicon.ico': ['icon.ico', 'image/x-icon'] };
+        const assets = {
+          '/': ['index.html', 'text/html'],
+          '/app.js': ['app.js', 'text/javascript'],
+          '/theme-init.js': ['theme-init.js', 'text/javascript'],
+          '/style.css': ['style.css', 'text/css'],
+          '/icon.svg': ['icon.svg', 'image/svg+xml'],
+          '/favicon.ico': ['icon.ico', 'image/x-icon']
+        };
         const asset = assets[url.pathname];
         if (asset) {
           const content = await readFile(join(publicDir, asset[0]));

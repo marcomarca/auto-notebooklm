@@ -20,10 +20,20 @@ let createRequest = crypto.randomUUID();
 let accountData = { accounts: [] }, accountStamp = '', backupStamp = '', savingBackups = false;
 let viewingExplorer = false, remoteBooks = [], selectedRemoteId = null, remoteDetail = null, selectedArtifacts = new Set(), explorerProfile = null, explorerSeq = 0;
 let currentCatalog = null, selectedCatalogSources = new Set(), selectedCatalogArtifacts = new Set(), activeCatalogTab = 'artifacts', pendingDeleteTarget = null;
-let recipes = [], activeViewTab = 'matrix', currentMatrix = null, currentPlanPreview = null;
+let catalogRequestSeq = 0, catalogLoadError = null, lastCatalogLoadTime = 0;
+let recipes = [], recipesLoaded = false, activeViewTab = 'matrix', currentMatrix = null, currentPlanPreview = null;
 let matrixRequestSeq = 0, matrixPage = 1, planRequestId = null;
 let librarySearchQuery = '', libraryPage = 1, libraryTotal = 0, searchDebounce = null;
+let lastFocusedElement = null, lastDialogTrigger = null;
+let refreshTimeout = null, consecutiveRefreshErrors = 0;
+let currentNoticeToast = null, noticeDismissTimer = null;
 const date = t => new Intl.DateTimeFormat('es-BO', { dateStyle:'medium', timeStyle:'short', timeZone:'America/La_Paz' }).format(t);
+const safeDate = t => {
+  if (!t) return '—';
+  const n = typeof t === 'string' && /^\d+$/.test(t) ? Number(t) : t;
+  const d = new Date(n);
+  return Number.isNaN(d.getTime()) ? '—' : date(d);
+};
 
 function el(tag, attrs = {}, text) {
   const node = document.createElement(tag);
@@ -36,14 +46,127 @@ function el(tag, attrs = {}, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
-function notice(text, error = false) { $('notice').textContent = text; $('notice').hidden = !text; $('notice').className = error ? 'error' : ''; }
-async function api(path, { method = 'GET', data, binary } = {}) {
-  const response = await fetch(path, { method, headers: { ...(method !== 'GET' ? { 'X-Local-Token': token } : {}), ...(data ? { 'Content-Type':'application/json' } : {}) }, body: binary || (data ? JSON.stringify(data) : undefined) });
-  const value = await response.json();
-  if (!response.ok) throw new Error(value.error || 'No se pudo completar la operación.');
-  return value;
+
+function notice(text, error = false, { persistent = false } = {}) {
+  const legacyNotice = $('notice');
+  if (legacyNotice) {
+    legacyNotice.textContent = text || '';
+    legacyNotice.className = error ? 'error' : '';
+  }
+
+  const container = $('notice-container');
+  if (!container) return;
+
+  if (!text) {
+    if (currentNoticeToast && !currentNoticeToast.dataset.error && !currentNoticeToast.dataset.persistent) {
+      if (noticeDismissTimer) { clearTimeout(noticeDismissTimer); noticeDismissTimer = null; }
+      currentNoticeToast.remove();
+      currentNoticeToast = null;
+    }
+    return;
+  }
+
+  if (currentNoticeToast && currentNoticeToast.dataset.message === text) {
+    return;
+  }
+
+  if (noticeDismissTimer) {
+    clearTimeout(noticeDismissTimer);
+    noticeDismissTimer = null;
+  }
+  if (currentNoticeToast) {
+    currentNoticeToast.remove();
+    currentNoticeToast = null;
+  }
+
+  const toast = el('div', { class: `notice-toast ${error ? 'error' : 'success'}` });
+  toast.dataset.message = text;
+  toast.dataset.error = error ? '1' : '';
+  toast.dataset.persistent = persistent ? '1' : '';
+
+  const content = el('div', { class: 'notice-toast-content' }, text);
+  toast.append(content);
+
+  const closeBtn = el('button', {
+    type: 'button',
+    class: 'notice-close-btn',
+    'aria-label': 'Cerrar aviso',
+    title: 'Cerrar aviso'
+  }, '×');
+  closeBtn.addEventListener('click', () => {
+    if (noticeDismissTimer) { clearTimeout(noticeDismissTimer); noticeDismissTimer = null; }
+    toast.remove();
+    if (currentNoticeToast === toast) currentNoticeToast = null;
+  });
+  toast.append(closeBtn);
+
+  container.append(toast);
+  currentNoticeToast = toast;
+
+  if (!error && !persistent) {
+    const startTimer = () => {
+      noticeDismissTimer = setTimeout(() => {
+        if (currentNoticeToast === toast) {
+          toast.remove();
+          currentNoticeToast = null;
+        }
+      }, 6000);
+    };
+    startTimer();
+
+    toast.addEventListener('mouseenter', () => {
+      if (noticeDismissTimer) { clearTimeout(noticeDismissTimer); noticeDismissTimer = null; }
+    });
+    toast.addEventListener('mouseleave', () => {
+      if (!noticeDismissTimer) startTimer();
+    });
+    toast.addEventListener('focusin', () => {
+      if (noticeDismissTimer) { clearTimeout(noticeDismissTimer); noticeDismissTimer = null; }
+    });
+    toast.addEventListener('focusout', () => {
+      if (!noticeDismissTimer) startTimer();
+    });
+  }
 }
-async function act(fn) { try { await fn(); await refresh(); } catch(e) { notice(e.message, true); } }
+
+async function api(path, { method = 'GET', data, binary, timeout, signal } = {}) {
+  let timer = null;
+  let abortSignal = signal;
+  if (!signal && timeout && timeout > 0) {
+    const controller = new AbortController();
+    abortSignal = controller.signal;
+    timer = setTimeout(() => controller.abort(new Error(`Timeout de red (${timeout}ms)`)), timeout);
+  }
+  try {
+    const response = await fetch(path, {
+      method,
+      signal: abortSignal,
+      headers: {
+        ...(method !== 'GET' ? { 'X-Local-Token': token } : {}),
+        ...(data ? { 'Content-Type': 'application/json' } : {})
+      },
+      body: binary || (data ? JSON.stringify(data) : undefined)
+    });
+    const value = await response.json();
+    if (!response.ok) throw new Error(value.error || 'No se pudo completar la operación.');
+    return value;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function act(fn) {
+  try {
+    await fn();
+    if (typeof scheduleImmediateRefresh === 'function') {
+      scheduleImmediateRefresh();
+    } else {
+      await refresh();
+    }
+  } catch(e) {
+    notice(e.message, true);
+  }
+}
 
 // --- Studio Player Console Controller ---
 const STUDIO_STORAGE_KEY = 'bloqueaudio_studio_player_v1';
@@ -201,6 +324,43 @@ const studioPlayer = {
     }, 2500);
   },
 
+  updateBufferBar() {
+    const bar = $('player-buffer-bar');
+    if (!bar) return;
+    const audio = this.audio;
+    if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0 || !audio.buffered || audio.buffered.length === 0) {
+      bar.style.background = 'transparent';
+      return;
+    }
+    const dur = audio.duration;
+    const ranges = [];
+    for (let i = 0; i < audio.buffered.length; i++) {
+      const start = Math.max(0, Math.min(100, (audio.buffered.start(i) / dur) * 100));
+      const end = Math.max(0, Math.min(100, (audio.buffered.end(i) / dur) * 100));
+      if (end > start) {
+        ranges.push({ start, end });
+      }
+    }
+    if (!ranges.length) {
+      bar.style.background = 'transparent';
+      return;
+    }
+    const parts = [];
+    let last = 0;
+    const bufColor = 'rgba(150, 140, 190, 0.45)';
+    for (const r of ranges) {
+      if (r.start > last) {
+        parts.push(`transparent ${last}%`, `transparent ${r.start}%`);
+      }
+      parts.push(`${bufColor} ${r.start}%`, `${bufColor} ${r.end}%`);
+      last = r.end;
+    }
+    if (last < 100) {
+      parts.push(`transparent ${last}%`, `transparent 100%`);
+    }
+    bar.style.background = `linear-gradient(to right, ${parts.join(', ')})`;
+  },
+
   wireAudioEvents() {
     const audio = this.audio;
 
@@ -218,6 +378,18 @@ const studioPlayer = {
       this.syncRowIndicators();
     });
 
+    audio.addEventListener('progress', () => {
+      this.updateBufferBar();
+    });
+
+    audio.addEventListener('seeking', () => {
+      this.updateBufferBar();
+    });
+
+    audio.addEventListener('seeked', () => {
+      this.updateBufferBar();
+    });
+
     audio.addEventListener('timeupdate', () => {
       if (!this.isDraggingProgress) {
         const curr = audio.currentTime;
@@ -233,10 +405,12 @@ const studioPlayer = {
           }
         }
       }
+      this.updateBufferBar();
       this.queueThrottledPositionSave();
     });
 
     audio.addEventListener('loadedmetadata', () => {
+      this.updateBufferBar();
       const dur = audio.duration;
       const progress = $('player-progress');
       const durEl = $('player-duration');
@@ -315,6 +489,7 @@ const studioPlayer = {
 
     audio.addEventListener('error', () => {
       this.updateBadge('error', 'Error');
+      this.updateBufferBar();
       const msg = $('player-message');
       if (msg) {
         msg.textContent = 'No se pudo reproducir este audio.';
@@ -607,6 +782,7 @@ const studioPlayer = {
       progress.max = 0;
       progress.disabled = true;
     }
+    this.updateBufferBar();
     const backBtn = $('player-step-back');
     if (backBtn) backBtn.disabled = true;
     const fwdBtn = $('player-step-forward');
@@ -694,11 +870,61 @@ function showHealth(h) {
   $('login-hint').hidden = h.auth || !h.cli || h.errorCode !== 'AUTH_REQUIRED';
   $('login-hint').textContent = `nlm login -p ${h.profile || 'default'}`;
 }
+function hasPendingActivity() {
+  if (uploading) return true;
+  if (books.some(b => ['creating', 'upload_pending', 'uploading', 'source_processing', 'submitting', 'queued', 'generating', 'download', 'convert'].includes(b.state) ||
+                      b.running ||
+                      (b.blocks || []).some(bl => ['download', 'convert', 'generating', 'submitting', 'uploading', 'source_processing', 'queued'].includes(bl.state)))) {
+    return true;
+  }
+  if (currentCatalog?.artifacts?.some(a => ['generating', 'queued', 'submitting', 'downloading'].includes(a.status))) {
+    return true;
+  }
+  return false;
+}
+
+function getNextRefreshDelay() {
+  if (consecutiveRefreshErrors > 0) {
+    return Math.min(60000, 2000 * Math.pow(1.5, consecutiveRefreshErrors));
+  }
+  if (typeof document !== 'undefined' && document.hidden) {
+    return 30000;
+  }
+  if (hasPendingActivity()) {
+    return 2000;
+  }
+  return 15000;
+}
+
+function scheduleNextRefresh(overrideDelay) {
+  if (refreshTimeout) {
+    clearTimeout(refreshTimeout);
+    refreshTimeout = null;
+  }
+  const delay = typeof overrideDelay === 'number' ? overrideDelay : getNextRefreshDelay();
+  refreshTimeout = setTimeout(() => {
+    refreshTimeout = null;
+    refresh();
+  }, delay);
+}
+
+function scheduleImmediateRefresh() {
+  if (refreshTimeout) {
+    clearTimeout(refreshTimeout);
+    refreshTimeout = null;
+  }
+  refreshTimeout = setTimeout(() => {
+    refreshTimeout = null;
+    refresh();
+  }, 30);
+}
+
 async function refresh() {
   if (refreshing) return;
   refreshing = true;
   try {
     const [health, current, profiles] = await Promise.all([api('/api/health'), api('/api/books'), api('/api/accounts')]);
+    consecutiveRefreshErrors = 0;
     accountData = profiles; renderAccounts();
     showHealth(health); books = current;
     if (!viewingExplorer && !books.some(b=>b.id === selected)) selected = books[0]?.id;
@@ -722,16 +948,28 @@ async function refresh() {
         if (changed) renderRemoteDetail();
       }
     }
-    if (!recipes.length) loadRecipes();
+    if (!recipesLoaded) {
+      recipesLoaded = true;
+      loadRecipes();
+    }
     if (!viewingExplorer && selected) {
       if (!currentCatalog || currentCatalog.bookId !== selected) {
         loadCatalog(selected);
+      } else if (hasPendingActivity() || Date.now() - lastCatalogLoadTime > 30000) {
+        loadCatalog(selected);
       }
-      loadMatrix(selected);
+      if (activeViewTab === 'matrix') {
+        loadMatrix(selected);
+      }
     }
     render();
-  } catch(e) { notice(`No se pudo conectar a la aplicación. ${e.message}`, true); }
-  finally { refreshing = false; }
+  } catch(e) {
+    consecutiveRefreshErrors++;
+    notice(`No se pudo conectar a la aplicación. ${e.message}`, true);
+  } finally {
+    refreshing = false;
+    scheduleNextRefresh();
+  }
 }
 function renderAccounts() {
   const stamp = JSON.stringify(accountData);
@@ -830,6 +1068,11 @@ function choose(id) {
     matrixPage = 1;
     currentPlanPreview = null;
     planRequestId = null;
+    currentCatalog = null;
+    selectedCatalogSources.clear();
+    selectedCatalogArtifacts.clear();
+    catalogRequestSeq++;
+    catalogLoadError = null;
   }
   selected = id;
   localStorage.setItem('selected-book', id);
@@ -840,13 +1083,23 @@ function choose(id) {
 }
 
 async function openExplorer() {
-  viewingExplorer = true; lastRender = ''; render();
+  lastFocusedElement = document.activeElement;
+  viewingExplorer = true;
+  lastRender = '';
+  render();
+  setTimeout(() => $('explorer-title')?.focus(), 50);
   await loadRemoteBooks();
 }
 function closeExplorer() {
-  viewingExplorer = false; if (!selected && books.length) selected = books[0].id;
-  lastRender = ''; render();
+  viewingExplorer = false;
+  if (!selected && books.length) selected = books[0].id;
+  lastRender = '';
+  render();
   if (selected) loadCatalog(selected);
+  if (lastFocusedElement && typeof lastFocusedElement.focus === 'function') {
+    lastFocusedElement.focus();
+    lastFocusedElement = null;
+  }
 }
 async function loadRemoteBooks() {
   const profile = $('explorer-profile')?.value || explorerProfile || accountData.current || 'default';
@@ -1408,23 +1661,185 @@ $('generation-mode')?.addEventListener('change', () => {
 });
 $('generate').addEventListener('click',()=>act(()=>api(`/api/books/${selected}/queue`,{method:'POST',data:{action:'start',mode:$('generation-mode')?.value || 'immediate'}})));
 $('pause').addEventListener('click',()=>act(()=>api(`/api/books/${selected}/queue`,{method:'POST',data:{action:'pause'}})));
+function uploadFileWithProgress(url, file, authToken, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url, true);
+    if (authToken) {
+      xhr.setRequestHeader('X-Local-Token', authToken);
+    }
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.setRequestHeader('X-Source-Filename', encodeURIComponent(file.name));
+
+    if (xhr.upload && typeof onProgress === 'function') {
+      xhr.upload.addEventListener('progress', e => {
+        if (e.lengthComputable && e.total > 0) {
+          const percent = Math.min(100, Math.round((e.loaded / e.total) * 100));
+          onProgress(percent, e.loaded, e.total);
+        }
+      });
+    }
+
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(data);
+      } else {
+        reject(new Error(data.error || `Error ${xhr.status} al subir el archivo.`));
+      }
+    };
+
+    xhr.onerror = () => reject(new Error('Error de red al subir el archivo.'));
+    xhr.onabort = () => reject(new Error('Subida cancelada.'));
+    xhr.send(file);
+  });
+}
+
+const MAX_UPLOAD_BYTES = 200 * 1024 * 1024; // 200 MiB (209715200 bytes)
+
 async function addFiles(list) {
   if (uploading || !selected) return;
-  const bookId=selected;
-  const files=[...list].sort((a,b)=>a.name.localeCompare(b.name,'es',{numeric:true,sensitivity:'base'}));
-  uploading=true; render(); let added=0, duplicates=0; const errors=[];
-  for (let i=0;i<files.length;i++) {
-    const file=files[i]; notice(`Guardando archivo ${i+1} de ${files.length}: ${file.name}`);
-    try {
-      if (!/\.(md|pdf)$/i.test(file.name)) throw new Error('Solo se admiten Markdown o PDF.');
-      const result=await api(`/api/books/${bookId}/files?filename=${encodeURIComponent(file.name)}&requestId=${crypto.randomUUID()}`,{method:'PUT',binary:file});
-      if(result.duplicate || result.existing) duplicates++; else added++;
-    } catch(e) { errors.push(`${file.name}: ${e.message}`); }
+  const bookId = selected;
+  const rawFiles = [...list].sort((a,b) => a.name.localeCompare(b.name, 'es', { numeric: true, sensitivity: 'base' }));
+  if (!rawFiles.length) return;
+
+  const validFiles = [];
+  const rejectedFiles = [];
+
+  for (const file of rawFiles) {
+    if (!/\.(md|pdf)$/i.test(file.name)) {
+      rejectedFiles.push({ file, reason: 'Formato no compatible (solo .md y .pdf).' });
+      continue;
+    }
+    if (file.size === 0) {
+      rejectedFiles.push({ file, reason: 'El archivo está vacío (0 bytes).' });
+      continue;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      rejectedFiles.push({ file, reason: `El archivo supera el límite de 200 MiB (${(file.size / (1024 * 1024)).toFixed(1)} MiB).` });
+      continue;
+    }
+    validFiles.push(file);
   }
-  uploading=false; $('files').value=''; lastRender='';
-  notice(`${added} archivos añadidos.${duplicates ? ` ${duplicates} duplicados omitidos.` : ''}${errors.length ? ` ${errors.join(' ')}` : ' Se cargarán automáticamente en NotebookLM.'}`,!!errors.length);
-  await refresh();
+
+  const card = $('upload-progress-card');
+  const titleEl = $('upload-progress-title');
+  const progressList = $('upload-progress-list');
+  const rejectedCard = $('upload-rejected-card');
+  const rejectedList = $('upload-rejected-list');
+
+  if (rejectedFiles.length > 0) {
+    if (rejectedCard && rejectedList) {
+      rejectedCard.hidden = false;
+      rejectedList.replaceChildren(...rejectedFiles.map(r => {
+        const item = el('div', { class: 'upload-rejected-item' });
+        item.append(
+          el('span', { class: 'upload-file-name' }, r.file.name),
+          el('span', { class: 'upload-reason' }, ` — ${r.reason}`)
+        );
+        return item;
+      }));
+    }
+  } else if (rejectedCard) {
+    rejectedCard.hidden = true;
+  }
+
+  if (!validFiles.length) {
+    if ($('files')) $('files').value = '';
+    notice(`No se subieron archivos. ${rejectedFiles.length} archivo(s) descartado(s) por validación.`, true);
+    return;
+  }
+
+  uploading = true;
+  render();
+
+  if (card && progressList) {
+    card.hidden = false;
+    if (titleEl) titleEl.textContent = `Cargando ${validFiles.length} archivo(s)…`;
+  }
+
+  const rowEls = new Map();
+  if (progressList) {
+    progressList.replaceChildren(...validFiles.map((file, idx) => {
+      const row = el('div', { class: 'upload-item-row' });
+      row.dataset.fileName = file.name;
+      const meta = el('div', { class: 'upload-item-meta' });
+      meta.append(
+        el('span', { class: 'upload-item-name' }, file.name),
+        el('span', { class: 'upload-item-status' }, idx === 0 ? 'Iniciando…' : 'En espera…')
+      );
+      const barWrap = el('div', { class: 'upload-item-bar' });
+      const fill = el('span', { class: 'upload-item-fill', style: 'width: 0%' });
+      barWrap.append(fill);
+      row.append(meta, barWrap);
+      rowEls.set(file.name, { row, meta, statusEl: meta.lastChild, fill });
+      return row;
+    }));
+  }
+
+  let added = 0, duplicates = 0;
+  const errors = [];
+
+  try {
+    for (let i = 0; i < validFiles.length; i++) {
+      const file = validFiles[i];
+      const ui = rowEls.get(file.name);
+      if (ui) {
+        ui.statusEl.textContent = 'Subiendo… 0%';
+        ui.row.classList.add('uploading');
+      }
+
+      notice(`Subiendo archivo ${i + 1} de ${validFiles.length}: ${file.name}`);
+      try {
+        const uploadUrl = `/api/books/${bookId}/files?filename=${encodeURIComponent(file.name)}&requestId=${crypto.randomUUID()}`;
+        const result = await uploadFileWithProgress(uploadUrl, file, token, (percent) => {
+          if (ui) {
+            ui.fill.style.width = `${percent}%`;
+            ui.statusEl.textContent = `Subiendo… ${percent}%`;
+          }
+        });
+
+        if (ui) {
+          ui.fill.style.width = '100%';
+          ui.row.classList.remove('uploading');
+          if (result.duplicate || result.existing) {
+            ui.row.classList.add('duplicate');
+            ui.statusEl.textContent = 'Duplicado (omitido)';
+            duplicates++;
+          } else {
+            ui.row.classList.add('done');
+            ui.statusEl.textContent = 'Listo';
+            added++;
+          }
+        }
+      } catch (err) {
+        if (ui) {
+          ui.row.classList.remove('uploading');
+          ui.row.classList.add('error');
+          ui.statusEl.textContent = `Error: ${err.message}`;
+        }
+        errors.push(`${file.name}: ${err.message}`);
+      }
+    }
+  } finally {
+    uploading = false;
+    if ($('files')) $('files').value = '';
+    lastRender = '';
+    if (card && titleEl) {
+      titleEl.textContent = `Carga finalizada: ${added} añadido(s)${duplicates ? `, ${duplicates} duplicado(s)` : ''}${errors.length ? `, ${errors.length} error(es)` : ''}.`;
+    }
+    notice(
+      `${added} archivos añadidos.${duplicates ? ` ${duplicates} duplicados omitidos.` : ''}${rejectedFiles.length ? ` ${rejectedFiles.length} descartados.` : ''}${errors.length ? ` ${errors.join(' ')}` : ' Se cargarán automáticamente en NotebookLM.'}`,
+      errors.length > 0
+    );
+    scheduleImmediateRefresh();
+  }
 }
+
+$('upload-progress-close')?.addEventListener('click', () => {
+  $('upload-progress-card').hidden = true;
+});
 $('files').addEventListener('change',event=>addFiles(event.target.files));
 const drop=$('drop-zone');
 for(const event of ['dragenter','dragover']) drop.addEventListener(event,e=>{e.preventDefault();drop.classList.add('dragging');});
@@ -1435,14 +1850,59 @@ function escapeHtml(str) {
 }
 
 function openDeleteModal(book, artifactId, title) {
+  lastDialogTrigger = document.activeElement;
   pendingDeleteTarget = { book, artifactId, title };
   $('delete-modal-details').innerHTML = `
     <p><strong>Cuaderno:</strong> ${escapeHtml(book.title)}</p>
     <p><strong>Cuenta de acceso:</strong> ${escapeHtml(book.profile)}</p>
     <p><strong>Elemento:</strong> ${escapeHtml(title)}</p>
-    <p><strong>ID de artefacto:</strong> <code>${escapeHtml(artifactId)}</code></p>
+    <p><strong>ID remoto:</strong> <code>${escapeHtml(artifactId)}</code></p>
   `;
   $('delete-modal').showModal();
+}
+
+function normalizeCatalogResponse(data, expectedBookId) {
+  if (!data || typeof data !== 'object') return null;
+  const book = data.book || { id: expectedBookId };
+  const bookId = book.id || expectedBookId;
+  const rawItems = Array.isArray(data.items) ? data.items : [];
+
+  const artifacts = [];
+  const sources = [];
+  const notes = [];
+
+  for (const item of rawItems) {
+    const normalized = {
+      id: item.id,
+      remoteId: item.remote_id || item.remoteId,
+      kind: item.kind,
+      type: item.type || (item.kind === 'note' ? 'note' : item.kind === 'source' ? 'source' : 'audio'),
+      title: item.title || (item.kind === 'note' ? 'Nota' : item.kind === 'source' ? 'Fuente' : 'Contenido'),
+      status: item.status,
+      createdAt: item.created_time || item.createdAt || item.createdTime || null,
+      modifiedAt: item.modified_time || item.modifiedAt || item.modifiedTime || null,
+      notVisible: !!(item.not_visible ?? item.notVisible),
+      errorReason: item.error_reason || item.errorReason || null,
+      sourceIds: item.source_ids_json ? JSON.parse(item.source_ids_json || '[]') : (item.sourceIds || [])
+    };
+
+    if (item.kind === 'source') {
+      sources.push(normalized);
+    } else if (item.kind === 'note') {
+      notes.push(normalized);
+    } else {
+      artifacts.push(normalized);
+    }
+  }
+
+  return {
+    bookId,
+    book,
+    artifacts,
+    sources,
+    notes,
+    rawItems
+  };
 }
 
 async function loadCatalog(bookId) {
@@ -1457,13 +1917,31 @@ async function loadCatalog(bookId) {
     currentCatalog = null;
     return;
   }
+
+  const seq = ++catalogRequestSeq;
   try {
     const data = await api(`/api/books/${bookId}/catalog`);
-    currentCatalog = data;
+    if (seq !== catalogRequestSeq || selected !== bookId || viewingExplorer) return;
+    currentCatalog = normalizeCatalogResponse(data, bookId);
+    catalogLoadError = null;
+    lastCatalogLoadTime = Date.now();
+
+    const validArtIds = new Set(currentCatalog.artifacts.map(a => a.id));
+    for (const id of selectedCatalogArtifacts) {
+      if (!validArtIds.has(id)) selectedCatalogArtifacts.delete(id);
+    }
+    const validSrcIds = new Set(currentCatalog.sources.map(s => s.remoteId || s.id));
+    for (const id of selectedCatalogSources) {
+      if (!validSrcIds.has(id)) selectedCatalogSources.delete(id);
+    }
+
     renderCatalog();
   } catch (e) {
-    currentCatalog = null;
-    $('catalog-section').hidden = true;
+    if (seq !== catalogRequestSeq || selected !== bookId || viewingExplorer) return;
+    catalogLoadError = e.message;
+    if (!currentCatalog) {
+      $('catalog-section').hidden = true;
+    }
   }
 }
 
@@ -1487,6 +1965,7 @@ function renderCatalog() {
   $('count-sources').textContent = sources.length;
   $('count-notes').textContent = notes.length;
 
+  // 1. Pestaña Artefactos
   const artTbody = $('catalog-artifacts-list');
   const artEmpty = $('catalog-artifacts-empty');
   artEmpty.hidden = artifacts.length > 0;
@@ -1500,8 +1979,14 @@ function renderCatalog() {
 
   artTbody.replaceChildren(...artifacts.map(a => {
     const tr = el('tr');
+    if (a.notVisible) tr.classList.add('item-not-visible');
+
     const tdCheck = el('td');
-    const cb = el('input', { type: 'checkbox', checked: selectedCatalogArtifacts.has(a.id) });
+    const cb = el('input', {
+      type: 'checkbox',
+      checked: selectedCatalogArtifacts.has(a.id),
+      'aria-label': `Seleccionar artefacto ${a.title}`
+    });
     cb.addEventListener('change', () => {
       if (cb.checked) selectedCatalogArtifacts.add(a.id);
       else selectedCatalogArtifacts.delete(a.id);
@@ -1511,14 +1996,27 @@ function renderCatalog() {
 
     const tdTitle = el('td');
     tdTitle.append(el('strong', {}, a.title || 'Sin título'));
-    if (a.createdAt) tdTitle.append(el('small', { class: 'source-name' }, `Creado: ${date(a.createdAt)}`));
+    if (a.createdAt) tdTitle.append(el('small', { class: 'source-name' }, `Creado: ${safeDate(a.createdAt)}`));
 
     const tdType = el('td');
-    tdType.append(el('span', { class: `badge ${a.type}` }, a.type || 'desconocido'));
+    tdType.append(el('span', { class: `badge ${a.type}` }, a.type || 'audio'));
+
+    const tdRemoteId = el('td');
+    if (a.remoteId) {
+      tdRemoteId.append(el('code', { class: 'remote-id-tag' }, a.remoteId));
+    } else {
+      tdRemoteId.append(el('span', { class: 'muted' }, '—'));
+    }
 
     const tdState = el('td');
-    tdState.append(el('span', { class: `badge ${a.status === 'completed' || a.status === 'ready' ? 'done' : a.status === 'failed' ? 'error' : 'generating'}` },
-      a.status === 'completed' || a.status === 'ready' ? 'Completado' : a.status === 'failed' ? 'Error' : 'Generando'));
+    if (a.notVisible) {
+      tdState.append(el('span', { class: 'badge waiting_quota', title: 'No visible en NotebookLM o archivado' }, 'Archivado'));
+    } else {
+      const isReady = a.status === 'completed' || a.status === 'ready';
+      const isFailed = a.status === 'failed';
+      tdState.append(el('span', { class: `badge ${isReady ? 'done' : isFailed ? 'error' : 'generating'}` },
+        isReady ? 'Completado' : isFailed ? 'Error' : 'Generando'));
+    }
     if (a.errorReason) tdState.append(el('div', { class: 'block-error' }, a.errorReason));
 
     const tdAction = el('td');
@@ -1537,23 +2035,27 @@ function renderCatalog() {
         })
       }, 'Descargar'));
     }
+
+    const deleteTargetId = a.remoteId || a.id;
     tdAction.append(el('button', {
       class: 'quiet retry',
       style: 'color: #dc2626; margin-top: 4px;',
       type: 'button',
-      onclick: () => openDeleteModal(book, a.id, a.title)
+      onclick: () => openDeleteModal(book, deleteTargetId, a.title)
     }, 'Eliminar de NotebookLM…'));
 
-    tr.append(tdCheck, tdTitle, tdType, tdState, tdAction);
+    tr.append(tdCheck, tdTitle, tdType, tdRemoteId, tdState, tdAction);
     return tr;
   }));
 
+  // 2. Pestaña Fuentes
   const srcTbody = $('catalog-sources-list');
   const srcEmpty = $('catalog-sources-empty');
   srcEmpty.hidden = sources.length > 0;
   srcTbody.hidden = sources.length === 0;
 
-  $('select-all-sources').checked = sources.length > 0 && sources.every(s => selectedCatalogSources.has(s.id));
+  const validSources = sources.filter(s => !!s.remoteId);
+  $('select-all-sources').checked = validSources.length > 0 && validSources.every(s => selectedCatalogSources.has(s.remoteId));
   $('generate-from-sources-btn').disabled = selectedCatalogSources.size === 0;
   $('generate-from-sources-btn').textContent = selectedCatalogSources.size > 0
     ? `Generar audios de fuentes seleccionadas (${selectedCatalogSources.size})`
@@ -1561,29 +2063,45 @@ function renderCatalog() {
 
   srcTbody.replaceChildren(...sources.map(s => {
     const tr = el('tr');
+    if (s.notVisible) tr.classList.add('item-not-visible');
+
     const tdCheck = el('td');
-    const cb = el('input', { type: 'checkbox', checked: selectedCatalogSources.has(s.id) });
+    const srcKey = s.remoteId || s.id;
+    const cb = el('input', {
+      type: 'checkbox',
+      checked: selectedCatalogSources.has(srcKey),
+      disabled: !s.remoteId,
+      'aria-label': `Seleccionar fuente ${s.title}`
+    });
     cb.addEventListener('change', () => {
-      if (cb.checked) selectedCatalogSources.add(s.id);
-      else selectedCatalogSources.delete(s.id);
+      if (cb.checked) selectedCatalogSources.add(srcKey);
+      else selectedCatalogSources.delete(srcKey);
       renderCatalog();
     });
     tdCheck.append(cb);
 
     const tdTitle = el('td');
     tdTitle.append(el('strong', {}, s.title || 'Fuente'));
+    if (s.createdAt) tdTitle.append(el('small', { class: 'source-name' }, `Creado: ${safeDate(s.createdAt)}`));
 
     const tdId = el('td');
-    tdId.append(el('code', {}, s.id));
+    tdId.append(el('code', {}, s.remoteId || s.id || '—'));
 
     const tdState = el('td');
-    tdState.append(el('span', { class: `badge ${s.status === 2 || s.status === 'ready' ? 'done' : s.status === 3 ? 'error' : 'generating'}` },
-      s.status === 2 || s.status === 'ready' ? 'Lista' : s.status === 3 ? 'Error' : 'Procesando'));
+    if (s.notVisible) {
+      tdState.append(el('span', { class: 'badge waiting_quota' }, 'Archivado'));
+    } else {
+      const isReady = s.status === 2 || s.status === 'ready';
+      const isFailed = s.status === 3 || s.status === 'failed';
+      tdState.append(el('span', { class: `badge ${isReady ? 'done' : isFailed ? 'error' : 'generating'}` },
+        isReady ? 'Lista' : isFailed ? 'Error' : 'Procesando'));
+    }
 
     tr.append(tdCheck, tdTitle, tdId, tdState);
     return tr;
   }));
 
+  // 3. Pestaña Notas
   const notesTbody = $('catalog-notes-list');
   const notesEmpty = $('catalog-notes-empty');
   notesEmpty.hidden = notes.length > 0;
@@ -1591,8 +2109,11 @@ function renderCatalog() {
 
   notesTbody.replaceChildren(...notes.map(n => {
     const tr = el('tr');
+    if (n.notVisible) tr.classList.add('item-not-visible');
+
     const tdTitle = el('td', {}, n.title || 'Nota');
-    const tdId = el('td', {}, n.id || '—');
+    const tdId = el('td');
+    tdId.append(el('code', {}, n.remoteId || n.id || '—'));
     const tdContent = el('td', {}, n.content ? (n.content.slice(0, 100) + (n.content.length > 100 ? '…' : '')) : '—');
     tr.append(tdTitle, tdId, tdContent);
     return tr;
@@ -1667,8 +2188,8 @@ $('download-selected-artifacts-btn')?.addEventListener('click', () => {
 });
 
 $('select-all-sources')?.addEventListener('change', (e) => {
-  const sources = currentCatalog?.sources || [];
-  if (e.target.checked) selectedCatalogSources = new Set(sources.map(s => s.id));
+  const sources = (currentCatalog?.sources || []).filter(s => !!s.remoteId);
+  if (e.target.checked) selectedCatalogSources = new Set(sources.map(s => s.remoteId));
   else selectedCatalogSources.clear();
   renderCatalog();
 });
@@ -1713,6 +2234,12 @@ $('delete-modal-form')?.addEventListener('submit', async (e) => {
 $('delete-modal-cancel')?.addEventListener('click', () => {
   pendingDeleteTarget = null;
   $('delete-modal').close();
+});
+$('delete-modal')?.addEventListener('close', () => {
+  if (lastDialogTrigger && typeof lastDialogTrigger.focus === 'function') {
+    lastDialogTrigger.focus();
+    lastDialogTrigger = null;
+  }
 });
 
 async function loadRecipes() {
@@ -1981,6 +2508,7 @@ $('infographic-modal')?.addEventListener('close', () => $('infographic-full-imag
 
 async function openPlanPreview() {
   if (!selected) return;
+  lastDialogTrigger = document.activeElement;
   const bookId = selected;
   const recipeId = $('recipe-selector')?.value || 'study-book';
   notice('Calculando plan de producción multimodal…');
@@ -2074,6 +2602,12 @@ $('plan-modal-cancel')?.addEventListener('click', () => {
   currentPlanPreview = null;
   planRequestId = null;
 });
+$('plan-modal')?.addEventListener('close', () => {
+  if (lastDialogTrigger && typeof lastDialogTrigger.focus === 'function') {
+    lastDialogTrigger.focus();
+    lastDialogTrigger = null;
+  }
+});
 
 for (const [id, delta] of [['matrix-prev-page', -1], ['matrix-next-page', 1]]) {
   $(id)?.addEventListener('click', () => {
@@ -2115,7 +2649,72 @@ $('library-next-page')?.addEventListener('click', () => {
   render();
 });
 
-refresh(); setInterval(refresh,2000);
+const THEME_STORAGE_KEY = 'bloqueaudio_theme_v1';
+
+function applyTheme(theme) {
+  const root = document.documentElement;
+  if (theme === 'dark') {
+    root.setAttribute('data-theme', 'dark');
+  } else if (theme === 'light') {
+    root.setAttribute('data-theme', 'light');
+  } else {
+    root.removeAttribute('data-theme');
+  }
+}
+
+function initTheme() {
+  const selector = $('theme-selector');
+  let saved = 'system';
+  try {
+    saved = localStorage.getItem(THEME_STORAGE_KEY) || 'system';
+  } catch (_) {}
+
+  applyTheme(saved);
+
+  if (selector) {
+    selector.value = saved;
+    selector.addEventListener('change', () => {
+      const val = selector.value || 'system';
+      try {
+        localStorage.setItem(THEME_STORAGE_KEY, val);
+      } catch (_) {}
+      applyTheme(val);
+    });
+  }
+
+  window.addEventListener('storage', e => {
+    if (e.key === THEME_STORAGE_KEY) {
+      const newTheme = e.newValue || 'system';
+      if (selector) selector.value = newTheme;
+      applyTheme(newTheme);
+    }
+  });
+
+  const media = window.matchMedia('(prefers-color-scheme: dark)');
+  if (typeof media?.addEventListener === 'function') {
+    media.addEventListener('change', () => {
+      let cur = 'system';
+      try { cur = localStorage.getItem(THEME_STORAGE_KEY) || 'system'; } catch (_) {}
+      if (cur === 'system') {
+        applyTheme('system');
+      }
+    });
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    scheduleImmediateRefresh();
+  }
+});
+
+window.addEventListener('online', () => {
+  consecutiveRefreshErrors = 0;
+  scheduleImmediateRefresh();
+});
+
+initTheme();
+scheduleImmediateRefresh();
 
 function initDesktopUpdates() {
   if (!window.desktop) return;
